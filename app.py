@@ -1,4 +1,4 @@
-import re, os, requests, pandas as pd, streamlit as st, yfinance as yf
+import re, os, json, requests, pandas as pd, streamlit as st, yfinance as yf
 
 FEED = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 FEED_NEXT = "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
@@ -97,6 +97,27 @@ def events():
     df["bias"], df["strength"] = [o[0] for o in out], [o[1] for o in out]
     return df.sort_values("time")
 
+@st.cache_data(ttl=86400)
+def bls_dates():
+    txt = requests.get("https://www.bls.gov/schedule/news_release/bls.ics",
+                       headers={"User-Agent": "Mozilla/5.0"}, timeout=15).text
+    out = []
+    for blk in txt.split("BEGIN:VEVENT")[1:]:
+        sm = re.search(r"SUMMARY:(.+)", blk)
+        dt = re.search(r"DTSTART[^:\r\n]*:(\d{8})", blk)
+        if not (sm and dt):
+            continue
+        name = sm.group(1).strip()
+        low = name.lower()
+        if "state" in low or "metro" in low:
+            continue
+        lab = ("CPI" if "consumer price index" in low else "PPI" if "producer price index" in low
+               else "NFP" if "employment situation" in low else None)
+        if lab:
+            d = dt.group(1)
+            out.append((lab, name, f"{d[:4]}-{d[4:6]}-{d[6:]} 08:30"))
+    return out
+
 def gold_series(period, interval):
     for tk, name in [("XAUUSD=X", "Spot XAUUSD"), ("GC=F", "Futures GC=F")]:
         try:
@@ -135,13 +156,46 @@ def market_lean(m):
     bias = "Bullish gold" if score > 0.15 else "Bearish gold" if score < -0.15 else "Neutral"
     return bias, (int(abs(score) * 100) if bias != "Neutral" else 0)
 
+COLS = ["key", "title", "time", "bias", "strength", "move5", "move15", "hit"]
+
+def sb():
+    try:
+        return st.secrets["supabase"]["url"].rstrip("/"), st.secrets["supabase"]["key"]
+    except Exception:
+        return None
+
+def load_hist():
+    cfg = sb()
+    if cfg:
+        try:
+            hd = {"apikey": cfg[1], "Authorization": f"Bearer {cfg[1]}"}
+            rows = requests.get(f"{cfg[0]}/rest/v1/calls?select=*&limit=2000", headers=hd, timeout=10).json()
+            if isinstance(rows, list):
+                return pd.DataFrame(rows, columns=COLS)
+        except Exception:
+            pass
+    return pd.read_csv(HIST) if os.path.exists(HIST) else pd.DataFrame(columns=COLS)
+
+def save_hist(h):
+    h.to_csv(HIST, index=False)
+    cfg = sb()
+    if cfg and len(h):
+        try:
+            hd = {"apikey": cfg[1], "Authorization": f"Bearer {cfg[1]}",
+                  "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"}
+            requests.post(f"{cfg[0]}/rest/v1/calls?on_conflict=key", headers=hd,
+                          data=h.to_json(orient="records"), timeout=15)
+        except Exception:
+            pass
+
 def update_history(ev, px):
-    h = pd.read_csv(HIST) if os.path.exists(HIST) else pd.DataFrame(
-        columns=["key", "title", "time", "bias", "strength", "move5", "move15", "hit"])
+    h = load_hist()
+    changed = False
     for _, r in ev.iterrows():
         key = f"{r['title']}|{r['time']}"
         if key not in set(h.key):
             h.loc[len(h)] = [key, r["title"], str(r["time"]), r["bias"], r["strength"], None, None, None]
+            changed = True
     for i, r in h[h.move15.isna()].iterrows():
         t = pd.Timestamp(r["time"])
         if len(px) and t + pd.Timedelta(minutes=15) <= px.index[-1] and t >= px.index[0]:
@@ -149,9 +203,10 @@ def update_history(ev, px):
             h.at[i, "move5"] = round(px.asof(t + pd.Timedelta(minutes=5)) - p0, 2)
             h.at[i, "move15"] = round(px.asof(t + pd.Timedelta(minutes=15)) - p0, 2)
             if r["bias"] != "Neutral":
-                up = h.at[i, "move5"] > 0
-                h.at[i, "hit"] = int((r["bias"] == "Bullish gold") == up)
-    h.to_csv(HIST, index=False)
+                h.at[i, "hit"] = int((r["bias"] == "Bullish gold") == (h.at[i, "move5"] > 0))
+            changed = True
+    if changed:
+        save_hist(h)
     return h
 
 def tag(t):
@@ -249,11 +304,40 @@ def fomc_view():
         return b, s, "FOMC · MARKET LEAN"
     return fm, (mc if fm != "Neutral" else 0), "FOMC · MANUAL VIEW"
 
+def reliability(label):
+    d = h.dropna(subset=["hit"])
+    d = d[d.title.map(tag) == label]
+    n = len(d)
+    if n < 5:
+        return None, n
+    return (pd.to_numeric(d.hit).sum() + 2.5) / (n + 5), n
+
+def confidence(label, bias, strength):
+    if bias == "Neutral":
+        return 0, []
+    c, why = float(strength), [f"forecast shift {strength}"]
+    if ml and ml[0] != "Neutral":
+        if ml[0] == bias:
+            c *= 1.15
+            why.append("market agrees")
+        else:
+            c *= 0.7
+            why.append("market disagrees")
+    r, n = reliability(label)
+    if r is None:
+        why.append("track record building")
+    else:
+        c *= max(0.5, min(1.3, 2 * r))
+        why.append(f"{label} record {r:.0%} ({n} calls)")
+    return int(min(c, 95)), why
+
 def resolve(title, bias, s):
     lbl = tag(title)
     if lbl == "FOMC":
-        return fomc_view()
-    return bias, s, lbl
+        b, c, l = fomc_view()
+        return b, c, l, (["dollar, yields and gold trend"] if fm == "Auto (market)" else ["your manual view"])
+    c, why = confidence(lbl, bias, s)
+    return bias, c, lbl, why
 
 h = update_history(ev, px)
 now = pd.Timestamp.now(tz="UTC")
@@ -265,11 +349,12 @@ with tab1:
     if up.empty:
         st.info("No more high-impact USD events this week or next.")
     for _, r in up.iterrows():
-        bias, s, lbl = resolve(r["title"], r["bias"], int(r["strength"]))
+        bias, s, lbl, why = resolve(r["title"], r["bias"], int(r["strength"]))
         c = bias_color(bias)
         cc = conf_color(bias, s)
         bar = (f'<div class="bar"><div style="width:{s}%;background:{cc}"></div></div>'
-               f'<div class="sub">Confidence: <b style="color:{cc}">{s}%</b></div>') if bias != "Neutral" else ""
+               f'<div class="sub">Confidence: <b style="color:{cc}">{s}%</b></div>'
+               f'<div class="sub">{" · ".join(why)}</div>') if bias != "Neutral" else ""
         st.markdown(
             f'<div class="card" style="border-left:6px solid {c};box-shadow:0 0 14px {c}33">'
             f'<div class="tag">{lbl}</div><div class="ttl">{r["title"]}</div>'
@@ -281,13 +366,18 @@ with tab1:
 with tab2:
     rows = []
     for _, r in up.iterrows():
-        bias, s, _ = resolve(r["title"], r["bias"], int(r["strength"]))
+        bias, s, _, _w = resolve(r["title"], r["bias"], int(r["strength"]))
         txt = f"{arrow(bias)} {bias.replace(' gold', '')}" + (f" · {s}%" if bias != "Neutral" else "")
         rows.append((r["time"], r["title"], txt))
     cutoff = max(ev.time.max(), now) if len(ev) else now
-    for lbl, name, when_et in LATER:
+    try:
+        auto = bls_dates()
+    except Exception:
+        auto = []
+    later_list = (auto + [x for x in LATER if x[0] == "FOMC"]) if auto else LATER
+    for lbl, name, when_et in later_list:
         t = pd.Timestamp(when_et, tz="America/New_York").tz_convert("UTC")
-        if t <= cutoff:
+        if t <= cutoff or t > now + pd.Timedelta(days=75):
             continue
         if lbl == "FOMC":
             b, s, _ = fomc_view()
@@ -298,16 +388,19 @@ with tab2:
     cal = pd.DataFrame([(sast(t), n, b) for t, n, b in sorted(rows)], columns=["When (SAST)", "Event", "Bias"])
     st.dataframe(cal, hide_index=True, use_container_width=True)
     st.caption("Forecasts appear about a week before release, and the bias shows up then. "
-               "Dates beyond next week are typed in by hand and can change.")
+               "Dates beyond next week come from the BLS schedule (FOMC dates are typed in) and can change.")
 
 with tab3:
-    done = h.dropna(subset=["hit"])
+    done = h.dropna(subset=["hit"]).assign(hit=lambda d: pd.to_numeric(d.hit))
     if len(done):
         st.metric("Hit rate (5 min after release)", f"{done.hit.mean():.0%}", f"{len(done)} calls")
+        by = done.assign(event=done.title.map(tag)).groupby("event").hit.agg(["mean", "count"])
+        by["mean"] = (by["mean"] * 100).round(0).astype(int).astype(str) + "%"
+        st.dataframe(by.rename(columns={"mean": "hit rate", "count": "calls"}), use_container_width=True)
     else:
         st.caption("No finished calls yet. Results appear after events pass.")
     st.dataframe(h.drop(columns=["key"]).tail(30), hide_index=True)
 
-st.caption("Pair arrows show the usual USD relationship if the bias plays out, not separate predictions. Confidence is an uncalibrated rule-based score, not a probability. FOMC views are not "
+st.caption("Pair arrows show the usual USD relationship if the bias plays out, not separate predictions. Confidence blends forecast shift, market agreement and each event's own track record, but it is not a guaranteed probability. FOMC views are not "
            "counted in the track record. Not financial advice.")
 st.markdown('<div class="foot">HIGH SOCIETY</div>', unsafe_allow_html=True)
