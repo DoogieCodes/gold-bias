@@ -6,7 +6,7 @@ HIST = "history.csv"
 USD_DOWN = ["unemployment rate", "jobless claims", "unemployment claims"]
 USD_UP = ["cpi", "ppi", "non-farm", "retail sales", "gdp", "ism", "pmi",
           "hourly earnings", "pce", "jolts", "durable"]
-GREEN, RED, GREY = "#00C853", "#FF3B30", "#8A8A8A"
+GREEN, RED, GREY, BLUE = "#00C853", "#FF3B30", "#8A8A8A", "#00E5FF"
 LATER = [
     ("NFP", "Non-Farm Employment Change (October)", "2026-11-06 08:30"),
     ("CPI", "CPI (October)", "2026-11-10 08:30"),
@@ -17,18 +17,29 @@ LATER = [
     ("PPI", "PPI (November)", "2026-12-15 08:30"),
 ]
 
-st.set_page_config(page_title="Gold News Bias", page_icon="🥇", layout="centered")
+st.set_page_config(page_title="High Society | Gold News Bias", layout="centered")
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;500;700&display=swap');
+#MainMenu, footer, header{visibility:hidden}
 .stApp{background:#000;color:#fff}
-h1,h2,h3{color:#00E5FF!important;text-shadow:0 0 14px rgba(0,229,255,.55)}
+.block-container{padding-top:1.6rem;max-width:720px}
+.brand{text-align:center;padding:10px 0 18px;border-bottom:1px solid #0b3040;margin-bottom:18px}
+.wm{font-family:'Montserrat',sans-serif;font-weight:300;font-size:1.7rem;letter-spacing:.45em;
+    color:#fff;padding-left:.45em}
+.tg{font-family:'Montserrat',sans-serif;font-weight:500;font-size:.68rem;letter-spacing:.35em;
+    color:#00E5FF;margin-top:8px;text-shadow:0 0 12px rgba(0,229,255,.6);padding-left:.35em}
+.meta{text-align:center;font-size:.72rem;color:#7a7a7a;margin:-8px 0 14px;letter-spacing:.05em}
+.sec{font-family:'Montserrat',sans-serif;font-size:.72rem;letter-spacing:.3em;color:#00E5FF;
+     margin:18px 0 10px;font-weight:500}
 .card{background:#0a0a0a;border:1px solid #0b3040;border-radius:10px;padding:14px 16px;margin-bottom:12px}
-.tag{font-size:.7rem;letter-spacing:.14em;font-weight:700;color:#00E5FF}
+.tag{font-size:.68rem;letter-spacing:.16em;font-weight:700;color:#00E5FF}
 .ttl{font-size:1.05rem;font-weight:700;color:#fff;margin-top:2px}
 .sub{font-size:.8rem;color:#9a9a9a;margin-top:2px}
-.bias{font-size:1.15rem;font-weight:800;margin:8px 0 6px}
-.bar{background:#1a1a1a;border-radius:6px;height:8px;overflow:hidden;margin-top:4px}
-.bar div{height:8px}
+.bias{font-size:1.1rem;font-weight:800;margin:8px 0 6px;letter-spacing:.04em}
+.bar{background:#1a1a1a;border-radius:6px;height:6px;overflow:hidden;margin-top:4px}
+.bar div{height:6px}
+.foot{text-align:center;font-size:.68rem;letter-spacing:.25em;color:#5a5a5a;margin-top:26px}
 [data-testid="stMetricLabel"]{color:#00E5FF}
 [data-testid="stMetricValue"]{color:#fff}
 [data-testid="stExpander"]{border:1px solid #0b3040;border-radius:10px}
@@ -83,17 +94,29 @@ def events():
     df["bias"], df["strength"] = [o[0] for o in out], [o[1] for o in out]
     return df.sort_values("time")
 
+def gold_series(period, interval):
+    for tk, name in [("XAUUSD=X", "Spot XAUUSD"), ("GC=F", "Futures GC=F")]:
+        try:
+            s = yf.Ticker(tk).history(period=period, interval=interval)["Close"].dropna()
+            if len(s) > 5:
+                s.index = s.index.tz_localize("UTC") if s.index.tz is None else s.index.tz_convert("UTC")
+                return s, name
+        except Exception:
+            pass
+    return pd.Series(dtype=float), "unavailable"
+
 @st.cache_data(ttl=120)
 def prices():
-    s = yf.Ticker("GC=F").history(period="5d", interval="1m")["Close"]
-    s.index = s.index.tz_convert("UTC")
-    return s
+    return gold_series("5d", "1m")
 
 @st.cache_data(ttl=900)
 def market():
     out = {}
-    for k, tk in {"Gold": "GC=F", "Dollar (DXY)": "DX-Y.NYB", "US 10Y yield": "^TNX"}.items():
-        c = yf.Ticker(tk).history(period="1mo", interval="1d")["Close"].dropna()
+    g, _ = gold_series("1mo", "1d")
+    series = {"Gold": g}
+    for k, tk in {"Dollar (DXY)": "DX-Y.NYB", "US 10Y yield": "^TNX"}.items():
+        series[k] = yf.Ticker(tk).history(period="1mo", interval="1d")["Close"].dropna()
+    for k, c in series.items():
         out[k] = (float(c.iloc[-1]), float(c.iloc[-1] - c.iloc[-6]),
                   float(c.iloc[-1] / c.iloc[-6] - 1) * 100)
     return out
@@ -146,9 +169,11 @@ def arrow(b):
 def sast(t):
     return t.tz_convert("Africa/Johannesburg").strftime("%a %d %b, %H:%M")
 
-st.title("🥇 Gold News Bias")
+st.markdown('<div class="brand"><div class="wm">HIGH SOCIETY</div>'
+            '<div class="tg">GOLD NEWS BIAS</div></div>', unsafe_allow_html=True)
 try:
-    ev, px = events(), prices()
+    ev = events()
+    px, src = prices()
 except Exception as e:
     st.error(f"Could not load data: {e}")
     st.stop()
@@ -158,13 +183,18 @@ try:
 except Exception:
     mk, ml = None, None
 
+stamp = pd.Timestamp.now(tz="Africa/Johannesburg").strftime("%H:%M")
+st.markdown(f'<div class="meta">{src.upper()} · UPDATED {stamp} SAST</div>', unsafe_allow_html=True)
+
 c1, c2, c3 = st.columns(3)
+gold_now = px.iloc[-1] if len(px) else (mk["Gold"][0] if mk else None)
+if gold_now is not None and mk:
+    c1.metric("XAUUSD", f"{gold_now:,.2f}", f"{mk['Gold'][2]:+.1f}% 5d", delta_color="off")
 if mk:
-    c1.metric("Gold", f"{mk['Gold'][0]:,.0f}", f"{mk['Gold'][2]:+.1f}% 5d", delta_color="off")
-    c2.metric("Dollar", f"{mk['Dollar (DXY)'][0]:.1f}", f"{mk['Dollar (DXY)'][2]:+.1f}% 5d", delta_color="off")
+    c2.metric("DOLLAR", f"{mk['Dollar (DXY)'][0]:.1f}", f"{mk['Dollar (DXY)'][2]:+.1f}% 5d", delta_color="off")
     c3.metric("US 10Y", f"{mk['US 10Y yield'][0]:.2f}%", f"{mk['US 10Y yield'][1]:+.2f} 5d", delta_color="off")
 
-with st.expander("⚙ FOMC view"):
+with st.expander("FOMC view"):
     fm = st.selectbox("FOMC bias source", ["Auto (market)", "Bearish gold", "Bullish gold", "Neutral"])
     mc = st.slider("Manual confidence", 0, 100, 60)
     if ml:
@@ -237,3 +267,4 @@ with tab3:
 
 st.caption("Confidence is an uncalibrated rule-based score, not a probability. FOMC views are not "
            "counted in the track record. Not financial advice.")
+st.markdown('<div class="foot">HIGH SOCIETY</div>', unsafe_allow_html=True)
