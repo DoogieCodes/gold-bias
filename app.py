@@ -39,6 +39,9 @@ st.markdown("""
 .bias{font-size:1.1rem;font-weight:800;margin:8px 0 6px;letter-spacing:.04em}
 .bar{background:#1a1a1a;border-radius:6px;height:6px;overflow:hidden;margin-top:4px}
 .bar div{height:6px}
+.pairs{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.pair{background:#111;border:1px solid #0b3040;border-radius:6px;padding:3px 9px;font-size:.72rem;
+      color:#ddd;letter-spacing:.06em}
 .foot{text-align:center;font-size:.68rem;letter-spacing:.25em;color:#5a5a5a;margin-top:26px}
 [data-testid="stMetricLabel"]{color:#00E5FF}
 [data-testid="stMetricValue"]{color:#fff}
@@ -105,6 +108,10 @@ def gold_series(period, interval):
             pass
     return pd.Series(dtype=float), "unavailable"
 
+@st.cache_data(ttl=30)
+def spot_price():
+    return float(requests.get("https://api.gold-api.com/price/XAU", timeout=10).json()["price"])
+
 @st.cache_data(ttl=120)
 def prices():
     return gold_series("5d", "1m")
@@ -166,6 +173,16 @@ def conf_color(bias, s):
 def arrow(b):
     return "▲" if b == "Bullish gold" else "▼" if b == "Bearish gold" else "●"
 
+def pair_block(bias):
+    usd = 0 if bias == "Neutral" else (1 if bias == "Bearish gold" else -1)
+    chips = ""
+    for name, sign in [("USD", 1), ("XAUUSD", -1), ("EURUSD", -1), ("GBPUSD", -1), ("USDJPY", 1)]:
+        d = usd * sign
+        col = GREEN if d > 0 else RED if d < 0 else GREY
+        sym = "▲" if d > 0 else "▼" if d < 0 else "●"
+        chips += f'<span class="pair">{name} <b style="color:{col}">{sym}</b></span>'
+    return f'<div class="pairs">{chips}</div>'
+
 def sast(t):
     return t.tz_convert("Africa/Johannesburg").strftime("%a %d %b, %H:%M")
 
@@ -183,11 +200,16 @@ try:
 except Exception:
     mk, ml = None, None
 
+try:
+    spot = spot_price()
+except Exception:
+    spot = None
+src_label = "SPOT XAUUSD" if spot else src.upper()
 stamp = pd.Timestamp.now(tz="Africa/Johannesburg").strftime("%H:%M")
-st.markdown(f'<div class="meta">{src.upper()} · UPDATED {stamp} SAST</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="meta">{src_label} · UPDATED {stamp} SAST</div>', unsafe_allow_html=True)
 
 c1, c2, c3 = st.columns(3)
-gold_now = px.iloc[-1] if len(px) else (mk["Gold"][0] if mk else None)
+gold_now = spot if spot else (px.iloc[-1] if len(px) else (mk["Gold"][0] if mk else None))
 if gold_now is not None and mk:
     c1.metric("XAUUSD", f"{gold_now:,.2f}", f"{mk['Gold'][2]:+.1f}% 5d", delta_color="off")
 if mk:
@@ -232,7 +254,7 @@ with tab1:
             f'<div class="tag">{lbl}</div><div class="ttl">{r["title"]}</div>'
             f'<div class="sub">{sast(r["time"])} SAST</div>'
             f'<div class="sub">Forecast: {r["forecast"] or "-"} | Previous: {r["previous"] or "-"}</div>'
-            f'<div class="bias" style="color:{c}">Bias: {arrow(bias)} {bias.upper()}</div>{bar}</div>',
+            f'<div class="bias" style="color:{c}">Bias: {arrow(bias)} {bias.upper()}</div>{bar}{pair_block(bias)}</div>',
             unsafe_allow_html=True)
 
 with tab2:
@@ -265,6 +287,6 @@ with tab3:
         st.caption("No finished calls yet. Results appear after events pass.")
     st.dataframe(h.drop(columns=["key"]).tail(30), hide_index=True)
 
-st.caption("Confidence is an uncalibrated rule-based score, not a probability. FOMC views are not "
+st.caption("Pair arrows show the usual USD relationship if the bias plays out, not separate predictions. Confidence is an uncalibrated rule-based score, not a probability. FOMC views are not "
            "counted in the track record. Not financial advice.")
 st.markdown('<div class="foot">HIGH SOCIETY</div>', unsafe_allow_html=True)
