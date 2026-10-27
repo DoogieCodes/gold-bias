@@ -186,8 +186,29 @@ def pair_block(bias):
 def sast(t):
     return t.tz_convert("Africa/Johannesburg").strftime("%a %d %b, %H:%M")
 
+def gate():
+    try:
+        codes = dict(st.secrets["access_codes"])
+    except Exception:
+        return None
+    inv = {str(v): k for k, v in codes.items()}
+    if st.session_state.get("member"):
+        return st.session_state["member"]
+    entered = st.query_params.get("k", "")
+    if not entered:
+        st.markdown('<div class="meta">MEMBERS ONLY</div>', unsafe_allow_html=True)
+        entered = st.text_input("Access code", type="password", placeholder="Enter your member code")
+    if entered in inv:
+        st.session_state["member"] = inv[entered]
+        st.rerun()
+    elif entered:
+        st.error("That code isn't recognised.")
+    st.stop()
+
 st.markdown('<div class="brand"><div class="wm">HIGH SOCIETY</div>'
             '<div class="tg">GOLD NEWS BIAS</div></div>', unsafe_allow_html=True)
+member = gate()
+who = f" · {member.upper()}" if member else ""
 try:
     ev = events()
     px, src = prices()
@@ -206,7 +227,7 @@ except Exception:
     spot = None
 src_label = "SPOT XAUUSD" if spot else src.upper()
 stamp = pd.Timestamp.now(tz="Africa/Johannesburg").strftime("%H:%M")
-st.markdown(f'<div class="meta">{src_label} · UPDATED {stamp} SAST</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="meta">{src_label} · UPDATED {stamp} SAST{who}</div>', unsafe_allow_html=True)
 
 c1, c2, c3 = st.columns(3)
 gold_now = spot if spot else (px.iloc[-1] if len(px) else (mk["Gold"][0] if mk else None))
