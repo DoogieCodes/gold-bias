@@ -207,10 +207,17 @@ def sync_calendar():
         err = f"HTTP {code}" if code else type(e).__name__
         m = old[old.status == "meta"]
         last_ok = m.updated_at.max() if len(m) else (merged.updated_at.max() if len(merged) else None)
-    if err:
-        soon = merged[(merged.status == "scheduled") & (pd.to_datetime(merged["time"], utc=True) > now - pd.Timedelta(hours=1))]
-        if soon.empty:
-            merged = pd.concat([merged, schedule_events(now)], ignore_index=True)
+    soon = merged[
+        (merged["status"] == "scheduled") &
+        (merged["impact"] == "High") &
+        (pd.to_datetime(merged["time"], utc=True, errors="coerce") > now)
+    ]
+    if soon.empty:
+        backup = schedule_events(now)
+        if len(backup):
+            merged = pd.concat([merged, backup], ignore_index=True)
+            merged = merged.drop_duplicates("key", keep="last")
+            merged.to_csv(CAL_FILE, index=False)
     return merged, last_ok, err
 
 def events():
@@ -888,7 +895,7 @@ def build_card(r):
             expl = [f"Why (post-release surprise): actual {r['actual']} vs forecast {f_} points to a {side} USD "
                     f"(surprise score {int(r['strength'])})"]
         elif bias == "Neutral":
-            expl = [f"Why: no usable signal; forecast {f_} vs previous {p_} is too small or unavailable"]
+            expl = ["Waiting for data: forecast and previous values are too close or unavailable"]
         else:
             expl = [f"Why: forecast {f_} vs previous {p_} implies a {side} USD (prior score {int(r['strength'])}). "
                     f"{CTX.get(base, '')}"]
@@ -1002,16 +1009,41 @@ def card_html(c, nowt, pxs):
 @st.fragment(run_every=1)
 def cards_view():
     nowt = pd.Timestamp.now(tz="UTC")
-    cs = [c for c in st.session_state.get("cards", []) if c["time"] > nowt - pd.Timedelta(minutes=30)]
-    if not cs:
-        st.info("No more high-impact USD events this week or next.")
-        return
     try:
         pxs = prices()[0]["Close"]
     except Exception:
         pxs = pd.Series(dtype=float)
-    for c in cs:
-        st.markdown(card_html(c, nowt, pxs), unsafe_allow_html=True)
+
+    upcoming = cal_all.copy()
+    if len(upcoming):
+        upcoming = upcoming[
+            (upcoming["status"] == "scheduled") &
+            (upcoming["impact"] == "High")
+        ].copy()
+        upcoming["time"] = pd.to_datetime(upcoming["time"], utc=True, errors="coerce")
+        upcoming = upcoming[
+            upcoming["time"].notna() & (upcoming["time"] > nowt)
+        ].sort_values("time").head(3)
+
+    if upcoming.empty:
+        st.info("No upcoming high-impact USD events are currently available.")
+        return
+
+    cards_by_key = {c["key"]: c for c in st.session_state.get("cards", [])}
+    for _, r in upcoming.iterrows():
+        c = cards_by_key.get(r["key"])
+        if c:
+            st.markdown(card_html(c, nowt, pxs), unsafe_allow_html=True)
+        else:
+            forecast = str(r.get("forecast", "") or "").strip() or "Pending"
+            previous = str(r.get("previous", "") or "").strip() or "Unavailable"
+            st.markdown(
+                f"<div class=\"card\"><div class=\"ttl\">{r['title']}</div>"
+                f"<div class=\"sub\">{sast(r['time'])} SAST</div>"
+                f"<div class=\"bias\">Prediction pending</div>"
+                f"<div class=\"why\">Forecast: {forecast} · Previous: {previous}</div></div>",
+                unsafe_allow_html=True,
+            )
 
 tab1, tab2, tab3 = st.tabs(["Upcoming", "Calendar", "Track record"])
 
