@@ -1,5 +1,11 @@
 import re, os, io, math, json, time, requests, pandas as pd, streamlit as st, yfinance as yf
 
+try:  # HS EXPECTATION ENGINE (optional module: the app launches normally if it is missing or broken)
+    from hs_engine import ui as hs_ui
+    HS_IMPORT_ERR = None
+except Exception as _e:
+    hs_ui, HS_IMPORT_ERR = None, f"{type(_e).__name__}: {_e}"
+
 FEED = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 FEED_NEXT = "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
 HIST = "history.csv"
@@ -1045,7 +1051,7 @@ def cards_view():
                 unsafe_allow_html=True,
             )
 
-tab1, tab2, tab3 = st.tabs(["Upcoming", "Calendar", "Track record"])
+tab1, tab2, tab3, tab4 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation"])
 
 with tab1:
     cards_view()
@@ -1131,6 +1137,15 @@ with tab3:
     st.caption("Directionally correct is not the same as profitable: the profit view subtracts an assumed "
                f"${COST:.2f} per ounce for spread and slippage and ignores execution risk. Only predictions logged "
                "before release are evaluated. Reaction data is 1-minute resolution, so 5s/15s/30s moves are not available.")
+
+with tab4:
+    if hs_ui is None:
+        st.warning(f"HS Expectation Engine unavailable: {HS_IMPORT_ERR}")
+    else:
+        try:
+            hs_ui.render(st, cal_all, h, mk)
+        except Exception as _e:
+            st.warning(f"HS Expectation Engine error ({type(_e).__name__}: {_e}). The rest of the app is unaffected.")
 
 st.caption("Countdowns tick every second (screen only). Price is re-requested every 5 seconds, the calendar and "
            "market inputs every 60 seconds, and bias and confidence are recalculated when those inputs change. "
