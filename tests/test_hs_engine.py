@@ -4,6 +4,7 @@ import ast
 import os
 import re
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -59,6 +60,54 @@ def synthetic_bundle(seed=0, end="2026-09-01", drop=()):
 
 
 class TestProviders(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._p = [mock.patch.object(P, "RETRY", ()), mock.patch.object(P, "CACHE_DIR", self._tmp.name)]
+        [x.start() for x in self._p]
+
+    def tearDown(self):
+        [x.stop() for x in self._p]
+        self._tmp.cleanup()
+
+    def test_retry_then_success(self):
+        good = mock.Mock(status_code=200, text="observation_date,PAYEMS\n2024-01-01,100\n2024-02-01,101\n")
+        calls = [requests.Timeout(), good]
+        with mock.patch.object(P, "RETRY", (0.0,)):
+            sd = P.fetch_series("PAYEMS", getter=mock.Mock(side_effect=calls))
+        self.assertEqual(len(sd.df), 2)
+
+    def test_falls_back_to_saved_copy_and_flags_it(self):
+        good = mock.Mock(status_code=200, text="observation_date,PAYEMS\n2024-01-01,100\n2024-02-01,101\n")
+        P.fetch_series("PAYEMS", getter=mock.Mock(return_value=good))           # saves a copy
+        sd = P.fetch_series("PAYEMS", getter=mock.Mock(side_effect=requests.Timeout()))
+        self.assertEqual(len(sd.df), 2)
+        self.assertIn("saved copy", sd.note)
+        b = P.load_bundle(["PAYEMS"], fetcher=lambda sid: P.fetch_series(sid, getter=mock.Mock(side_effect=requests.Timeout())))
+        self.assertIn("PAYEMS", b.series)
+        self.assertIn("saved copy", b.errors["PAYEMS"])   # surfaced to the UI, not hidden
+
+    def test_api_route_used_when_key_set(self):
+        js = {"observations": [{"date": "2024-01-01", "value": "100"}, {"date": "2024-02-01", "value": "."},
+                               {"date": "2024-03-01", "value": "102"}]}
+        resp = mock.Mock(status_code=200)
+        resp.json.return_value = js
+        g = mock.Mock(return_value=resp)
+        P.set_api_key("TESTKEY")
+        try:
+            sd = P.fetch_series("PAYEMS", getter=g)
+        finally:
+            P.set_api_key(None)
+        self.assertEqual(len(sd.df), 2)
+        self.assertIn("api.stlouisfed.org", g.call_args[0][0])
+
+    def test_api_json_errors(self):
+        for bad in [{}, {"error_message": "bad key"}, {"observations": []}, []]:
+            with self.assertRaises(P.ProviderError):
+                P.parse_fred_json(bad, "PAYEMS")
+
+    def test_no_data_and_no_cache_raises(self):
+        with self.assertRaises(P.ProviderError):
+            P.fetch_series("ICSA", getter=mock.Mock(side_effect=requests.Timeout()))
     def test_parse_good_and_missing_dots(self):
         d = P.parse_fred_csv("observation_date,PAYEMS\n2024-01-01,100\n2024-02-01,.\n2024-03-01,102\n", "PAYEMS")
         self.assertEqual(len(d), 2)
@@ -395,18 +444,33 @@ class _FakeSt:
 
 
 class TestUiAndCompat(unittest.TestCase):
-    def test_ui_renders_with_synthetic_bundle(self):
-        from hs_engine import ui
+    def test_ui_and_main_view_render_with_synthetic_bundle(self):
+        from hs_engine import ui, dashboard, runtime as RT
         B = synthetic_bundle()
         cal = pd.DataFrame([{"key": "Core CPI m/m|2026-11-10", "title": "Core CPI m/m", "time": "2026-11-10 13:30:00+00:00",
-                             "impact": "High", "forecast": "0.3%", "previous": "0.2%", "actual": "", "status": "scheduled",
-                             "updated_at": ""}])
-        h = pd.DataFrame(columns=["key", "move5", "move15"])
-        RealStore = ST.Store
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(ui, "get_bundle", return_value=B), \
-                mock.patch.object(ui.ST, "Store", lambda **k: RealStore(d, origin="synthetic")):
-            ui.render(_FakeSt(), cal, h, None, now=pd.Timestamp("2026-11-03", tz="UTC"))
-            self.assertEqual(len(RealStore(d, origin="synthetic").forecasts()), 1)
+                             "impact": "High", "forecast": "0.3%", "previous": "0.2%", "actual": "", "status": "scheduled", "updated_at": ""},
+                            {"key": "FOMC Rate Decision|2026-11-12", "title": "FOMC Rate Decision", "time": "2026-11-12 19:00:00+00:00",
+                             "impact": "High", "forecast": "4.5%", "previous": "4.5%", "actual": "", "status": "scheduled", "updated_at": ""}])
+        h = pd.DataFrame(columns=["key", "title", "pre_release", "move30", "move5", "move15", "reversal"])
+        now = pd.Timestamp("2026-11-03", tz="UTC")
+        with tempfile.TemporaryDirectory() as d:
+            RT._S.update(bundle=B, reports=R.compute_reports(B), running=False, finished=time.time(), error=None)
+            RT._DONE.clear()
+            HS = RT.results(cal, now=now, store_factory=lambda sb: ST.Store(d, origin="synthetic"))
+            self.assertEqual(HS["status"], "ready")
+            self.assertEqual(len(HS["results"]), 1)       # FOMC is not an HS-supported release
+            ui.render(_FakeSt(), cal, h, None, HS, now=now)
+            md = []
+            fake = _FakeSt()
+            fake.markdown = lambda t, **k: md.append(t)
+            tag = lambda t: "CPI" if "CPI" in t else "FOMC"
+            dashboard.render_main(fake, now, [], cal, HS, h, tag)
+            page = " ".join(md)
+            for word in ["NEXT EVENT", "CONSENSUS", "HS ESTIMATE", "INITIAL SPIKE", "REVERSAL TENDENCY", "UPCOMING", "FOMC Rate Decision"]:
+                self.assertIn(word, page)
+            self.assertEqual(len(ST.Store(d, origin="synthetic").forecasts()), 1)
+            RT.results(cal, now=now, store_factory=lambda sb: ST.Store(d, origin="synthetic"))   # rerun: no duplicate row
+            self.assertEqual(len(ST.Store(d, origin="synthetic").forecasts()), 1)
 
     def test_app_py_keeps_original_functionality(self):
         src = open(os.path.join(ROOT, "app.py"), encoding="utf-8").read()
@@ -422,6 +486,82 @@ class TestUiAndCompat(unittest.TestCase):
             self.assertIn(token, src)
         self.assertIn("hs_engine", src)
         self.assertIn("HS Expectation", src)
+        self.assertIn("def main_view", src)
+        self.assertIn("Detailed analyst cards (original view)", src)
+        self.assertIn("cards_view()", src)
+
+
+class TestRuntimeAndDashboard(unittest.TestCase):
+    def setUp(self):
+        from hs_engine import runtime as RT
+        self.RT = RT
+        RT._S.update(bundle=None, reports=None, running=False, finished=0.0, error=None)
+
+    def test_never_blocks_while_data_loads(self):
+        def slow():
+            time.sleep(1.5)
+            return synthetic_bundle()
+        t0 = time.time()
+        HS = self.RT.results(pd.DataFrame(), loader=slow)
+        self.assertLess(time.time() - t0, 0.5)
+        self.assertEqual(HS["status"], "loading")
+        for _ in range(100):
+            time.sleep(0.5)
+            if self.RT.snapshot()["status"] == "ready":
+                break
+        self.assertEqual(self.RT.snapshot()["status"], "ready")
+
+    def test_total_failure_is_reported_and_retry_is_throttled(self):
+        calls = []
+        def fail():
+            calls.append(1)
+            return P.Bundle(errors={"PAYEMS": "network error (ReadTimeout)"}, fetched_at=pd.Timestamp("2026-10-30"))
+        self.RT.results(pd.DataFrame(), loader=fail)
+        for _ in range(50):
+            time.sleep(0.1)
+            if not self.RT.snapshot()["running"]:
+                break
+        HS = self.RT.results(pd.DataFrame(), loader=fail)
+        self.RT.results(pd.DataFrame(), loader=fail)
+        self.assertEqual(HS["status"], "unavailable")
+        self.assertIn("ReadTimeout", HS["error"])
+        self.assertEqual(len(calls), 1)      # not hammered on every page run
+
+    def test_failed_refresh_keeps_last_good_data(self):
+        B = synthetic_bundle()
+        self.RT._S.update(bundle=B, reports=R.compute_reports(B), running=False, finished=0.0, error=None)
+        self.RT.ensure_started(loader=lambda: P.Bundle(errors={"PAYEMS": "down"}, fetched_at=pd.Timestamp("2026-10-30")), force=True)
+        for _ in range(50):
+            time.sleep(0.1)
+            if not self.RT.snapshot()["running"]:
+                break
+        self.assertEqual(self.RT.snapshot()["status"], "ready")
+        self.assertIn("PAYEMS", self.RT.snapshot()["bundle"].series)
+
+    def test_dashboard_spike_lean_rules(self):
+        from hs_engine import dashboard as D
+        base = {"estimate": 0.4, "consensus": 0.3, "diff": 0.1, "tier": "meaningful"}
+        self.assertEqual(D.spike_lean(None, base)[0], "Bearish gold")
+        self.assertEqual(D.spike_lean(None, {**base, "diff": -0.1})[0], "Bullish gold")
+        self.assertEqual(D.spike_lean(None, {**base, "tier": "negligible"})[0], "No edge")
+        self.assertEqual(D.spike_lean(None, {**base, "consensus": None})[0], "No edge")
+        self.assertEqual(D.spike_lean(None, None)[0], "No edge")
+        self.assertEqual(D.spike_lean({"base": "FOMC", "spike": "Bullish gold"}, None)[0], "Bullish gold")
+
+    def test_reaction_stats_only_from_tracked_history(self):
+        from hs_engine import dashboard as D
+        h = pd.DataFrame({"title": ["CPI m/m"] * 4, "pre_release": [1] * 4, "move30": [1, 2, 3, None], "move5": [1, -2, 3, 9],
+                          "move15": [2, -4, 6, 9], "reversal": [0, 1, 0, None]})
+        st_ = D.reaction_stats(h, "CPI", lambda t: "CPI")
+        self.assertEqual(st_["n"], 3)
+        self.assertAlmostEqual(st_["m15"], 4.0)
+        self.assertEqual(D.reaction_stats(h.iloc[0:0], "CPI", lambda t: "CPI")["n"], 0)
+
+    def test_countdown_text(self):
+        from hs_engine import dashboard as D
+        now = pd.Timestamp("2026-11-01", tz="UTC")
+        self.assertEqual(D.countdown(now + pd.Timedelta(hours=1, seconds=5), now), "IN 01:00:05")
+        self.assertIn("RELEASED", D.countdown(now - pd.Timedelta(minutes=2), now))
 
 
 if __name__ == "__main__":

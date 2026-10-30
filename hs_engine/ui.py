@@ -9,7 +9,7 @@ from . import scenarios as S
 from . import store as ST
 from .config import MODEL_VERSION, SPECS
 from .models import METHOD_LABEL
-from .providers import get_bundle
+from . import runtime as RT
 
 STATUS = {"forecast_ready": ("FORECAST READY", "#00C853"), "insufficient_data": ("INSUFFICIENT DATA", "#8A8A8A"),
           "waiting_consensus": ("WAITING FOR CONSENSUS", "#FFB300"), "waiting_release": ("WAITING FOR RELEASE", "#FFB300"),
@@ -112,44 +112,36 @@ def _details(st, r, mk, h):
                 st.markdown("- " + line)
 
 
-def render(st, cal_all, h, mk, now=None):
+def render(st, cal_all, h, mk, HS, now=None):
     now = pd.Timestamp.now(tz="UTC") if now is None else now
     st.markdown('<div class="sec">HS EXPECTATION ENGINE</div>', unsafe_allow_html=True)
     st.caption(f"Independent statistical estimates from free public data (FRED). Model {MODEL_VERSION}. Official forecasts come "
                "from the calendar feed and are shown separately. Analytical decision support, not a trade signal.")
-    bundle = get_bundle()
-    if not bundle.series:
-        st.error("Data provider unavailable: no FRED series could be loaded. " + "; ".join(bundle.errors.values())[:300])
+    status = HS["status"] if HS else "unavailable"
+    if status == "loading":
+        st.info("Downloading free data and running backtests in the background. This page updates automatically when ready.")
         return
-    reports = R.get_reports(bundle)
-    store = ST.Store(supabase=_supabase(st))
+    if status != "ready":
+        st.error("Data provider unavailable: no FRED series could be loaded. " + (HS.get("error") or "")[:600] if HS else "Engine not running.")
+        st.caption("The app retries automatically every 10 minutes. If it keeps timing out, add a free FRED API key "
+                   "(see README) to use a second route to the same data.")
+        if st.button("Retry data download now"):
+            RT.ensure_started(force=True)
+            st.rerun()
+        return
+    bundle, reports = HS["bundle"], HS["reports"]
+    store = HS.get("store") or ST.Store()
     age = (pd.Timestamp.now(tz="UTC").tz_localize(None) - bundle.fetched_at).total_seconds() / 3600
-    msg = f"Data fetched {age:.1f} h ago"
     if bundle.errors:
         st.warning("Some data failed to load, using older copies where available: " +
-                   "; ".join(f"{k}: {v}" for k, v in bundle.errors.items())[:400])
-    st.caption(msg)
-
-    evs = []
-    if cal_all is not None and len(cal_all):
-        d = cal_all[(cal_all.status == "scheduled")].copy()
-        d["t"] = pd.to_datetime(d["time"], utc=True, errors="coerce")
-        d = d[d.t.notna() & (d.t > now - pd.Timedelta(days=2)) & (d.t < now + pd.Timedelta(days=21))].sort_values("t")
-        evs = [dict(key=r["key"], title=r["title"], time=r["t"], forecast=r["forecast"], actual=r["actual"]) for _, r in d.iterrows()]
+                   "; ".join(f"{k}: {v}" for k, v in bundle.errors.items())[:500])
+        if st.button("Retry data download now"):
+            RT.ensure_started(force=True)
+            st.rerun()
+    st.caption(f"Data fetched {age:.1f} h ago")
     shown = 0
-    for ev in evs:
-        r = R.evaluate_event(ev, bundle, reports, now)
-        if r is None:
-            continue
+    for r in sorted(HS["results"].values(), key=lambda r: r["scheduled_utc"]):
         shown += 1
-        try:
-            if r["actual"] is not None and r["scheduled_utc"] <= now:
-                store.record_outcome(r["event_key"], r["release"], r["measure"], r["unit"], r["actual"], now,
-                                     R.actual_from_fred(bundle, r["release"], r["measure"], r["ref_period"]))
-            elif r["status"] in ("forecast_ready", "waiting_consensus"):
-                store.log_forecast(r, now)
-        except Exception as e:
-            st.caption(f"Forecast log problem: {type(e).__name__}")
         _card(st, r)
         _details(st, r, mk, h)
     if not shown:

@@ -1,44 +1,54 @@
-"""Free data access: FRED public CSV downloads (no key). Same access method the existing app's macro() uses.
+"""Free data access from FRED.
 
-Limitations (see README): the CSV carries the LATEST vintage only, with no publication timestamps, so
-availability is approximated with conservative lag rules from config.SERIES."""
+Route 1 (default, no key): the public CSV download, same as the app's existing macro().
+Route 2 (optional, free key): the FRED API on a different host (api.stlouisfed.org). Used first when a key is configured.
+If both fail for a series, the last good copy saved on disk is used and flagged as older data.
+
+Limitation: both routes give the LATEST vintage only, with no publication timestamps, so availability is approximated
+with conservative lag rules from config.SERIES."""
 import io
-import threading
+import os
 import time
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 
 import pandas as pd
 import requests
 
-from .config import (CACHE_FAIL_SECONDS, CACHE_OK_SECONDS, FRED_CSV, HTTP_TIMEOUT, SERIES, USER_AGENT)
+from .config import FRED_CSV, SERIES, USER_AGENT
+
+API_URL = "https://api.stlouisfed.org/fred/series/observations"
+START = "1990-01-01"
+TIMEOUT = (10, 45)          # (connect, read) seconds; the old 15 s read timeout was too tight for FRED from cloud hosts
+RETRY = (1.0, 3.0)          # sleeps between attempts (3 attempts in total)
+CACHE_DIR = os.path.join("hs_data", "cache")
+_KEY = {"v": None}
 
 
 class ProviderError(Exception):
     pass
 
 
-@dataclass
 class SeriesData:
-    sid: str
-    df: pd.DataFrame            # index = observation date (naive); columns: value, avail (naive UTC timestamp)
-    fetched_at: pd.Timestamp
-    source: str = "FRED public CSV (latest vintage)"
+    def __init__(self, sid, df, fetched_at, source="FRED public CSV (latest vintage)", note=""):
+        self.sid, self.df, self.fetched_at, self.source, self.note = sid, df, fetched_at, source, note
 
     @property
     def last_obs(self):
         return self.df.index[-1] if len(self.df) else None
 
 
-@dataclass
 class Bundle:
-    series: dict = field(default_factory=dict)
-    errors: dict = field(default_factory=dict)
-    fetched_at: pd.Timestamp = None
+    def __init__(self, series=None, errors=None, fetched_at=None):
+        self.series = series if series is not None else {}
+        self.errors = errors if errors is not None else {}
+        self.fetched_at = fetched_at
 
     def fingerprint(self):
         return tuple(sorted((k, str(v.last_obs), len(v.df), round(float(v.df["value"].iloc[-1]), 6))
                             for k, v in self.series.items() if len(v.df)))
+
+
+def set_api_key(key):
+    _KEY["v"] = key or os.environ.get("FRED_API_KEY") or None
 
 
 def _availability(idx, freq, lag):
@@ -47,17 +57,9 @@ def _availability(idx, freq, lag):
     return base.normalize() + pd.Timedelta(days=lag)
 
 
-def parse_fred_csv(text, sid):
-    """Parse FRED CSV text into a SeriesData frame. Raises ProviderError on malformed or empty content."""
-    try:
-        d = pd.read_csv(io.StringIO(text))
-    except Exception as e:
-        raise ProviderError(f"{sid}: malformed CSV ({type(e).__name__})") from e
-    if d.shape[1] < 2 or len(d) == 0:
-        raise ProviderError(f"{sid}: malformed CSV (unexpected shape)")
-    idx = pd.to_datetime(d.iloc[:, 0], errors="coerce")
-    val = pd.to_numeric(d.iloc[:, 1], errors="coerce")   # FRED writes missing values as "."
-    out = pd.DataFrame({"value": val.values}, index=idx)
+def _frame(idx, val, sid):
+    out = pd.DataFrame({"value": pd.to_numeric(pd.Series(list(val)), errors="coerce").values},
+                       index=pd.to_datetime(pd.Series(list(idx)), errors="coerce"))
     out = out[out.index.notna() & out["value"].notna()]
     out = out[~out.index.duplicated(keep="last")].sort_index()
     if out.empty:
@@ -67,59 +69,103 @@ def parse_fred_csv(text, sid):
     return out
 
 
-def fetch_series(sid, getter=requests.get):
+def parse_fred_csv(text, sid):
     try:
-        r = getter(FRED_CSV, params={"id": sid}, timeout=HTTP_TIMEOUT, headers=USER_AGENT)
-    except requests.RequestException as e:
-        raise ProviderError(f"{sid}: network error ({type(e).__name__})") from e
-    if r.status_code == 429:
-        raise ProviderError(f"{sid}: rate limited (HTTP 429)")
-    if r.status_code >= 400:
-        raise ProviderError(f"{sid}: HTTP {r.status_code}")
-    return SeriesData(sid, parse_fred_csv(r.text, sid), pd.Timestamp.now(tz="UTC").tz_localize(None))
+        d = pd.read_csv(io.StringIO(text))
+    except Exception as e:
+        raise ProviderError(f"{sid}: malformed CSV ({type(e).__name__})") from e
+    if d.shape[1] < 2 or len(d) == 0:
+        raise ProviderError(f"{sid}: malformed CSV (unexpected shape)")
+    return _frame(d.iloc[:, 0], d.iloc[:, 1], sid)
+
+
+def parse_fred_json(obj, sid):
+    obs = obj.get("observations") if isinstance(obj, dict) else None
+    if not isinstance(obs, list) or not obs:
+        msg = obj.get("error_message") if isinstance(obj, dict) else None
+        raise ProviderError(f"{sid}: API returned no observations" + (f" ({msg})" if msg else ""))
+    return _frame([o.get("date") for o in obs], [o.get("value") for o in obs], sid)
+
+
+def _request(url, params, getter):
+    last = "unknown error"
+    for i in range(len(RETRY) + 1):
+        try:
+            r = getter(url, params=params, timeout=TIMEOUT, headers=USER_AGENT)
+        except requests.RequestException as e:
+            last = f"network error ({type(e).__name__})"
+        else:
+            if r.status_code == 200:
+                return r
+            if r.status_code not in (429, 500, 502, 503, 504):
+                raise ProviderError(f"HTTP {r.status_code}")
+            last = "rate limited (HTTP 429)" if r.status_code == 429 else f"HTTP {r.status_code}"
+        if i < len(RETRY):
+            time.sleep(RETRY[i])
+    raise ProviderError(last)
+
+
+def _cache_path(sid):
+    return os.path.join(CACHE_DIR, sid + ".csv")
+
+
+def _cache_write(sid, df):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        df[["value"]].to_csv(_cache_path(sid))
+    except Exception:
+        pass
+
+
+def _cache_read(sid):
+    p = _cache_path(sid)
+    try:
+        if os.path.exists(p):
+            return parse_fred_csv(open(p).read(), sid), pd.Timestamp(os.path.getmtime(p), unit="s")
+    except Exception:
+        pass
+    return None, None
+
+
+def _now():
+    return pd.Timestamp.now(tz="UTC").tz_localize(None)
+
+
+def fetch_series(sid, getter=requests.get):
+    errs = []
+    if _KEY["v"]:
+        try:
+            r = _request(API_URL, {"series_id": sid, "api_key": _KEY["v"], "file_type": "json",
+                                   "observation_start": START}, getter)
+            sd = SeriesData(sid, parse_fred_json(r.json(), sid), _now(), "FRED API (latest vintage)")
+            _cache_write(sid, sd.df)
+            return sd
+        except (ProviderError, ValueError) as e:
+            errs.append(f"API: {e}")
+    try:
+        r = _request(FRED_CSV, {"id": sid, "cosd": START}, getter)
+        sd = SeriesData(sid, parse_fred_csv(r.text, sid), _now())
+        _cache_write(sid, sd.df)
+        return sd
+    except ProviderError as e:
+        errs.append(f"CSV: {e}")
+    df, when = _cache_read(sid)
+    if df is not None:
+        return SeriesData(sid, df, when, "saved copy on disk",
+                          note=f"download failed ({'; '.join(errs)}); using saved copy from {when:%Y-%m-%d %H:%M} UTC")
+    raise ProviderError(f"{sid}: " + "; ".join(errs))
 
 
 def load_bundle(sids=None, fetcher=fetch_series):
-    """Fetch every series; a failure is recorded per series and never raised."""
-    sids = list(sids or SERIES)
-    b = Bundle(fetched_at=pd.Timestamp.now(tz="UTC").tz_localize(None))
-
-    def one(sid):
+    """Fetch every series one at a time (gentler on FRED than parallel requests). Failures are recorded per series
+    and never raised."""
+    b = Bundle(fetched_at=_now())
+    for sid in list(sids or SERIES):
         try:
-            return sid, fetcher(sid), None
-        except Exception as e:  # provider failure must never crash the app
-            return sid, None, str(e) or type(e).__name__
-
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        for sid, sd, err in ex.map(one, sids):
-            if sd is not None:
-                b.series[sid] = sd
-            else:
-                b.errors[sid] = err
+            sd = fetcher(sid)
+            b.series[sid] = sd
+            if getattr(sd, "note", ""):
+                b.errors[sid] = sd.note
+        except Exception as e:
+            b.errors[sid] = str(e) or type(e).__name__
     return b
-
-
-_LOCK = threading.Lock()
-_CACHE = {"bundle": None, "at": 0.0}
-
-
-def get_bundle(force=False, fetcher=fetch_series):
-    """Process-wide cache: 6 h after a clean load, 10 min after any failure. If a refresh fails completely the
-    previous bundle is kept (its fetched_at shows how old it is) and the errors are attached."""
-    with _LOCK:
-        cur, age = _CACHE["bundle"], time.time() - _CACHE["at"]
-        ttl = CACHE_FAIL_SECONDS if (cur is None or cur.errors) else CACHE_OK_SECONDS
-        if cur is not None and age < ttl and not force:
-            return cur
-        new = load_bundle(fetcher=fetcher)
-        if not new.series and cur is not None:
-            cur.errors = {**cur.errors, **new.errors}
-            _CACHE["at"] = time.time()
-            return cur
-        if cur is not None:   # keep a stale copy of any series that failed this time
-            for sid, sd in cur.series.items():
-                if sid not in new.series:
-                    new.series[sid] = sd
-                    new.errors[sid] = new.errors.get(sid, "refresh failed") + " (showing older copy)"
-        _CACHE.update(bundle=new, at=time.time())
-        return new
