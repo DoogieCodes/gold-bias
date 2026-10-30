@@ -1,10 +1,11 @@
 import re, os, io, math, json, time, requests, pandas as pd, streamlit as st, yfinance as yf
 
 try:  # HS EXPECTATION ENGINE (optional module: the app launches normally if it is missing or broken)
-    from hs_engine import ui as hs_ui
+    from hs_engine import ui as hs_ui, dashboard as hs_dash, runtime as hs_rt
     HS_IMPORT_ERR = None
 except Exception as _e:
-    hs_ui, HS_IMPORT_ERR = None, f"{type(_e).__name__}: {_e}"
+    hs_ui = hs_dash = hs_rt = None
+    HS_IMPORT_ERR = f"{type(_e).__name__}: {_e}"
 
 FEED = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 FEED_NEXT = "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
@@ -1051,10 +1052,42 @@ def cards_view():
                 unsafe_allow_html=True,
             )
 
+def _hs_secret(section, field):
+    try:
+        return st.secrets[section][field]
+    except Exception:
+        return None
+
+HS = None  # HS engine results; computed without waiting on the network (data loads in a background thread)
+if hs_rt is not None:
+    try:
+        st.markdown(hs_dash.CSS, unsafe_allow_html=True)
+        _sbc = {"url": _hs_secret("supabase", "url"), "key": _hs_secret("supabase", "key")}
+        HS = hs_rt.results(cal_all, api_key=_hs_secret("fred", "api_key"),
+                           supabase=_sbc if (_sbc["url"] and _sbc["key"]) else None)
+    except Exception as _e:
+        HS = None
+        HS_IMPORT_ERR = f"{type(_e).__name__}: {_e}"
+
+@st.fragment(run_every=1)
+def main_view():
+    """Clean main screen: NEXT EVENT with HS expectation, then UPCOMING."""
+    try:
+        if HS and HS["status"] == "loading" and hs_rt.snapshot()["status"] != "loading":
+            st.rerun()  # data finished loading: redraw with HS numbers
+        hs_dash.render_main(st, pd.Timestamp.now(tz="UTC"), st.session_state.get("cards", []), cal_all, HS, h, tag)
+    except Exception as _e:
+        st.warning(f"Clean view unavailable ({type(_e).__name__}: {_e}). The original cards are in the expander below.")
+
 tab1, tab2, tab3, tab4 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation"])
 
 with tab1:
-    cards_view()
+    if hs_dash is None:
+        cards_view()  # engine module missing: original view, exactly as before
+    else:
+        main_view()
+        with st.expander("Detailed analyst cards (original view)"):
+            cards_view()
 
 with tab2:
     rows = []
@@ -1143,7 +1176,7 @@ with tab4:
         st.warning(f"HS Expectation Engine unavailable: {HS_IMPORT_ERR}")
     else:
         try:
-            hs_ui.render(st, cal_all, h, mk)
+            hs_ui.render(st, cal_all, h, mk, HS)
         except Exception as _e:
             st.warning(f"HS Expectation Engine error ({type(_e).__name__}: {_e}). The rest of the app is unaffected.")
 
