@@ -1474,6 +1474,24 @@ with tab4:
 
 with tab5:
     event_history()
+    with st.expander("Actuals check"):
+        if st.button("Test BLS fetch"):
+            try:
+                yr = pd.Timestamp.now().year
+                body = {"seriesid": ["CES0000000001"], "startyear": str(yr - 1), "endyear": str(yr)}
+                try:
+                    body["registrationkey"] = st.secrets["bls"]["api_key"]
+                    url, keyed = BLS_URL2, "key found"
+                except Exception:
+                    url, keyed = BLS_URL1, "no key"
+                rr = requests.post(url, json=body, timeout=15)
+                jj = rr.json()
+                st.write("HTTP", rr.status_code, "|", keyed, "|", jj.get("status"), "|", " ".join(jj.get("message", [])))
+                ser = jj.get("Results", {}).get("series", [])
+                if ser:
+                    st.write("Latest payroll rows:", ser[0]["data"][:2])
+            except Exception as e:
+                st.write("Error:", type(e).__name__, str(e))
 
 st.caption("Countdowns tick every second (screen only). Price is re-requested every 5 seconds, the calendar and "
            "market inputs every 60 seconds, and bias and confidence are recalculated when those inputs change. "
