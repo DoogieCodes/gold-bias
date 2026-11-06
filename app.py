@@ -74,10 +74,11 @@ st.markdown("""
 [data-testid="stExpander"]{border:1px solid #0b3040;border-radius:10px}
 .stTabs [aria-selected="true"]{color:#00E5FF!important}
 .stTabs [data-baseweb="tab-highlight"]{background:#00E5FF!important}
-[data-testid="stMetricDelta"]{font-size:.95rem!important;font-weight:700!important;border-radius:6px!important}
+[data-testid="stMetricDelta"]{font-size:.95rem!important;font-weight:700!important;background:transparent!important}
+[data-testid="stMetricDelta"] *{background:transparent!important}
 [data-testid="stMetricDelta"] *{color:inherit!important}
-[data-testid="stMetricDelta"]:has([data-testid="stMetricDeltaIcon-Up"]){color:#00E676!important;background:rgba(0,230,118,.16)!important}
-[data-testid="stMetricDelta"]:has([data-testid="stMetricDeltaIcon-Down"]){color:#FF3B30!important;background:rgba(255,59,48,.16)!important}
+[data-testid="stMetricDelta"]:has([data-testid="stMetricDeltaIcon-Up"]){color:#00E676!important}
+[data-testid="stMetricDelta"]:has([data-testid="stMetricDeltaIcon-Down"]){color:#FF3B30!important}
 </style>
 """, unsafe_allow_html=True)
 
