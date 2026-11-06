@@ -227,8 +227,104 @@ def sync_calendar():
             merged.to_csv(CAL_FILE, index=False)
     return merged, last_ok, err
 
+BLS_URL1 = "https://api.bls.gov/publicAPI/v1/timeseries/data/"
+BLS_URL2 = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+BLS_IDS = ["CES0000000001", "LNS14000000", "CES0500000003", "CUSR0000SA0", "CUSR0000SA0L1E",
+           "CUUR0000SA0", "CUUR0000SA0L1E", "WPSFD4"]
+
+@st.cache_data(ttl=3600)
+def _bls(bucket):
+    # one request covers every series; the bucket number only controls how often it is refreshed
+    try:
+        key = st.secrets["bls"]["api_key"]
+    except Exception:
+        key = None
+    try:
+        yr = pd.Timestamp.now(tz="UTC").year
+        body = {"seriesid": BLS_IDS, "startyear": str(yr - 2), "endyear": str(yr)}
+        if key:
+            body["registrationkey"] = key
+        r = requests.post(BLS_URL2 if key else BLS_URL1, json=body, timeout=15)
+        r.raise_for_status()
+        out = {}
+        for s in r.json()["Results"]["series"]:
+            vals = {}
+            for d in s["data"]:
+                if d["period"].startswith("M") and d["period"] != "M13":
+                    try:
+                        vals[(int(d["year"]), int(d["period"][1:]))] = float(d["value"])
+                    except Exception:
+                        pass
+            out[s["seriesID"]] = vals
+        return out
+    except Exception:
+        return {}
+
+def bls_mapped(title):
+    tl = title.lower()
+    if "adp" in tl:
+        return False
+    return ("non-farm" in tl or "unemployment rate" in tl or "average hourly earnings" in tl
+            or "cpi" in tl or ("ppi" in tl and "core" not in tl))
+
+def bls_actual(title, t, d):
+    # the figure written the way the calendar writes it, or None if the BLS has not published it yet
+    tl = title.lower()
+    if not bls_mapped(title):
+        return None
+    try:
+        ref = t.tz_convert("UTC").tz_localize(None).to_period("M") - 1
+        prev, yago = ref - 1, ref - 12
+        g = lambda sid, p: d.get(sid, {}).get((p.year, p.month))
+        if "non-farm" in tl:
+            a, b = g("CES0000000001", ref), g("CES0000000001", prev)
+            return None if a is None or b is None else f"{a - b:.0f}K"
+        if "unemployment rate" in tl:
+            a = g("LNS14000000", ref)
+            return None if a is None else f"{a:.1f}%"
+        yy = "y/y" in tl
+        if "average hourly earnings" in tl:
+            sid = "CES0500000003"
+        elif "cpi" in tl:
+            core = "core" in tl
+            if yy:
+                sid = "CUUR0000SA0L1E" if core else "CUUR0000SA0"
+            else:
+                sid = "CUSR0000SA0L1E" if core else "CUSR0000SA0"
+        else:
+            sid = "WPSFD4"
+        a, b = g(sid, ref), g(sid, yago if yy else prev)
+        return None if a is None or b is None else f"{(a / b - 1) * 100:.1f}%"
+    except Exception:
+        return None
+
+def fill_actuals(cal):
+    if not len(cal):
+        return cal
+    nowt = pd.Timestamp.now(tz="UTC")
+    tt = pd.to_datetime(cal["time"], utc=True, errors="coerce")
+    blank = cal["actual"].astype(str).str.strip().isin(["", "nan", "None"])
+    mapped = cal["title"].astype(str).map(bls_mapped)
+    mask = ((cal.status == "scheduled") & (cal.impact == "High") & blank & mapped & tt.notna()
+            & (tt <= nowt) & (tt >= nowt - pd.Timedelta(days=5)))
+    if not mask.any():
+        return cal
+    age = (nowt - tt[mask].max()).total_seconds()
+    step = 60 if age <= 600 else 300 if age <= 3600 else 7200
+    d = _bls(int(time.time() // step))
+    if not d:
+        return cal
+    cal = cal.copy()
+    for i in cal.index[mask]:
+        v = bls_actual(str(cal.at[i, "title"]), tt[i], d)
+        if v:
+            cal.at[i, "actual"] = v
+    return cal
+
+
 def events():
     cal, last_ok, err = sync_calendar()
+    cal = fill_actuals(cal)
     df = cal[(cal.status == "scheduled") & (cal.impact == "High")].copy()
     empty = pd.DataFrame({"key": [], "title": [], "forecast": [], "previous": [], "actual": [], "bias": [],
                           "strength": [], "post": [], "z": [], "time": pd.to_datetime([], utc=True)})
