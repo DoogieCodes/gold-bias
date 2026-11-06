@@ -306,7 +306,7 @@ def fill_actuals(cal):
     blank = cal["actual"].astype(str).str.strip().isin(["", "nan", "None"])
     mapped = cal["title"].astype(str).map(bls_mapped)
     mask = ((cal.status == "scheduled") & (cal.impact == "High") & blank & mapped & tt.notna()
-            & (tt <= nowt) & (tt >= nowt - pd.Timedelta(days=5)))
+            & (tt <= nowt))
     if not mask.any():
         return cal
     age = (nowt - tt[mask].max()).total_seconds()
@@ -318,7 +318,7 @@ def fill_actuals(cal):
     for i in cal.index[mask]:
         v = bls_actual(str(cal.at[i, "title"]), tt[i], d)
         if v:
-            cal.at[i, "actual"] = v
+            cal.at[i, "actual"] = ("~" if (nowt - tt[i]) > pd.Timedelta(days=5) else "") + v
     return cal
 
 
@@ -1475,6 +1475,10 @@ with tab4:
 with tab5:
     event_history()
     with st.expander("Actuals check"):
+        if st.button("Show NFP rows"):
+            x = cal_all[cal_all.title.str.lower().str.contains("non-farm")]
+            st.dataframe(x[["title", "time", "status", "impact", "forecast", "previous", "actual"]]
+                         .sort_values("time", ascending=False).head(8), hide_index=True)
         if st.button("Test BLS fetch"):
             try:
                 yr = pd.Timestamp.now().year
