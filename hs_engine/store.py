@@ -70,8 +70,16 @@ class Store:
         try:
             r = requests.get(f"{self.sb['url'].rstrip('/')}/rest/v1/{table}?select=*&limit=5000",
                              headers=self._hd("return=representation"), timeout=10)
-            rows = r.json()
+            try:
+                rows = r.json()
+            except ValueError:
+                last_error["msg"] = f"{table}: reply was not JSON (HTTP {r.status_code}) {r.text[:80]!r}"
+                return None
+            if not r.ok:
+                last_error["msg"] = f"{table}: HTTP {r.status_code} {str(rows)[:100]}"
             if r.ok and isinstance(rows, list):
+                if (last_error["msg"] or "").startswith(table):
+                    last_error["msg"] = None
                 d = pd.DataFrame(rows)
                 for c in cols:
                     if c not in d.columns:
