@@ -1079,6 +1079,80 @@ def main_view():
     except Exception as _e:
         st.warning(f"Clean view unavailable ({type(_e).__name__}: {_e}). The original cards are in the expander below.")
 
+def previous_event_card():
+    """Most recent released high-impact USD event: actual vs forecast, the pre-release call, and the gold reaction."""
+    nowt = pd.Timestamp.now(tz="UTC")
+    c = cal_all
+    if len(c):
+        c = c[(c.status == "scheduled") & (c.impact == "High")].copy()
+        c["time"] = pd.to_datetime(c["time"], utc=True, errors="coerce")
+        c = c[c["time"].notna() & (c["time"] <= nowt)].sort_values("time")
+    st.markdown('<div class="sec">PREVIOUS EVENT</div>', unsafe_allow_html=True)
+    if not len(c):
+        st.caption("No released events saved yet.")
+        return
+    r = c.iloc[-1]
+    act, fc, pv = str(r["actual"]).strip(), str(r["forecast"]).strip(), str(r["previous"]).strip()
+    a, f = num(act), num(fc)
+    if act == "":
+        res_txt, res_col = "Actual not published yet", GREY
+    elif a is None or f is None:
+        res_txt, res_col = "Actual published", BLUE
+    elif a > f:
+        res_txt, res_col = "Above forecast", BLUE
+    elif a < f:
+        res_txt, res_col = "Below forecast", BLUE
+    else:
+        res_txt, res_col = "In line with forecast", BLUE
+
+    sur = surprise_lean(r["title"], act, fc) if act else None
+    sur_html = ""
+    if sur:
+        sur_html = (f'<div class="sub">Surprise points to: <b style="color:{bias_color(sur[0])}">'
+                    f'{arrow(sur[0])} {sur[0].upper()}</b> (score {sur[1]})</div>')
+
+    hr = h[h.key == r["key"]]
+    hr = hr.iloc[0] if len(hr) else None
+    call_html, moves_html, outcome_html = "", "", ""
+    if hr is not None and str(hr["bias"]) not in ("", "None", "nan"):
+        b = str(hr["bias"])
+        cf = pd.to_numeric(hr["confidence"], errors="coerce")
+        cf_txt = "n/a" if pd.isna(cf) else f"{int(cf)}%"
+        call_html = (f'<div class="bias" style="color:{bias_color(b)}">Bias called: {arrow(b)} {b.upper()}</div>'
+                     f'<div class="kv"><span>CONFIDENCE <b>{cf_txt}</b></span></div>')
+        hit = pd.to_numeric(hr["hit"], errors="coerce")
+        if pd.isna(hit):
+            outcome_html = ('<div class="sub">Outcome: no directional call to score</div>' if b == "Neutral"
+                            else '<div class="sub">Outcome: pending (scored 30 minutes after release)</div>')
+        else:
+            oc, ot = (GREEN, "CORRECT") if hit == 1 else (RED, "WRONG")
+            outcome_html = f'<div class="sub">Outcome (5m): <b style="color:{oc}">{ot}</b></div>'
+        cells = ""
+        got = False
+        for lab, col in [("1M", "move1"), ("5M", "move5"), ("15M", "move15"), ("30M", "move30")]:
+            v = pd.to_numeric(hr[col], errors="coerce")
+            if pd.isna(v):
+                cells += f"<span>{lab} <b>n/a</b></span>"
+            else:
+                got = True
+                cells += f'<span>{lab} <b style="color:{GREEN if v > 0 else RED if v < 0 else GREY}">{v:+.2f}</b></span>'
+        moves_html = (f'<div class="sub" style="margin-top:10px">XAUUSD reaction (USD per ounce)</div>'
+                      f'<div class="kv">{cells}</div>')
+        if not got:
+            moves_html += ('<div class="why">Reaction not recorded yet. It fills in about 30 minutes after release, '
+                           'once 1-minute price data covers the window.</div>')
+    else:
+        call_html = '<div class="why">No pre-release call was logged for this event, so there is no bias to score.</div>'
+
+    st.markdown(
+        f'<div class="card"><div class="tag">PREVIOUS EVENT</div><div class="ttl">{r["title"]}</div>'
+        f'<div class="sub">{sast(r["time"])} SAST</div>'
+        f'<div class="kv"><span>ACTUAL <b>{act or "n/a"}</b></span><span>FORECAST <b>{fc or "n/a"}</b></span>'
+        f'<span>PREVIOUS <b>{pv or "n/a"}</b></span></div>'
+        f'<div class="sub" style="margin-top:8px"><b style="color:{res_col}">{res_txt}</b></div>{sur_html}'
+        f'{call_html}{outcome_html}{moves_html}</div>',
+        unsafe_allow_html=True)
+
 tab1, tab2, tab3, tab4 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation"])
 
 with tab1:
@@ -1088,6 +1162,7 @@ with tab1:
         main_view()
         with st.expander("Detailed analyst cards (original view)"):
             cards_view()
+    previous_event_card()
 
 with tab2:
     rows = []
