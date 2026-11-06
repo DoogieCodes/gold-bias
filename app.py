@@ -1153,6 +1153,43 @@ def previous_event_card():
         f'{call_html}{outcome_html}{moves_html}</div>',
         unsafe_allow_html=True)
 
+@st.cache_data(ttl=21600)
+def _fred_s(sid):
+    r = requests.get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}", timeout=15,
+                     headers={"User-Agent": "HighSocietyGoldBias/1.0"})
+    r.raise_for_status()
+    d = pd.read_csv(io.StringIO(r.text))
+    s = pd.Series(pd.to_numeric(d.iloc[:, 1], errors="coerce").values, index=pd.to_datetime(d.iloc[:, 0], errors="coerce"))
+    return s.dropna()
+
+def fred_actual(title, t):
+    # fills a missing actual from FRED (latest revised figure, so it can differ slightly from the first release)
+    tl = title.lower()
+    try:
+        ref = (t.tz_convert("UTC").tz_localize(None).to_period("M") - 1).to_timestamp()
+        prev = ref - pd.DateOffset(months=1)
+        yago = ref - pd.DateOffset(months=12)
+        if "non-farm" in tl:
+            s = _fred_s("PAYEMS")
+            return f"{s[ref] - s[prev]:.0f}K"
+        if "unemployment rate" in tl:
+            return f"{_fred_s('UNRATE')[ref]:.1f}%"
+        sid = None
+        if "average hourly earnings" in tl:
+            sid = "CES0500000003"
+        elif "cpi" in tl:
+            sid = "CPILFESL" if "core" in tl else "CPIAUCSL"
+        elif "ppi" in tl and "core" not in tl:
+            sid = "PPIFIS"
+        if sid is None:
+            return None
+        s = _fred_s(sid)
+        base = yago if "y/y" in tl else prev
+        return f"{(s[ref] / s[base] - 1) * 100:.1f}%"
+    except Exception:
+        return None
+
+
 def event_history():
     # every released high-impact USD event on record, with the pre-release call and the gold reaction
     nowt = pd.Timestamp.now(tz="UTC")
@@ -1182,9 +1219,17 @@ def event_history():
         s = "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v).strip()
         return s if s and s.lower() not in ("nan", "none") else "n/a"
 
+    d["fred"] = False
+    for i, r in d.iterrows():
+        if txt(r["actual"]) == "n/a":
+            v = fred_actual(str(r["title"]), r["time"])
+            if v:
+                d.at[i, "actual"] = v
+                d.at[i, "fred"] = True
+
     def vs(r):
         if txt(r["actual"]) == "n/a":
-            return "n/a"
+            return "-"
         a, f = num(str(r["actual"])), num(str(r["forecast"]))
         if a is None or f is None:
             return "published"
@@ -1212,7 +1257,7 @@ def event_history():
     out = pd.DataFrame({
         "When (SAST)": d["time"].dt.tz_convert("Africa/Johannesburg").dt.strftime("%Y-%m-%d %H:%M"),
         "Event": d["title"],
-        "Actual": d["actual"].map(txt),
+        "Actual": d.apply(lambda r: ("~" if r["fred"] else "") + (txt(r["actual"]) if txt(r["actual"]) != "n/a" else "-"), axis=1),
         "Forecast": d["forecast"].map(txt),
         "Previous": d["previous"].map(txt),
         "vs forecast": d.apply(vs, axis=1),
@@ -1227,7 +1272,7 @@ def event_history():
     earliest = out.iloc[-1]["When (SAST)"][:10]
     st.caption(f"{len(out)} {label} events on record, earliest {earliest}. Actual figures come from the calendar feed. "
                "Bias, confidence, outcome and moves exist only for events whose call was logged before release. "
-               "Moves are USD per ounce.")
+               "Moves are USD per ounce. A ~ means the actual was filled from FRED (latest revised figure, can differ slightly from the first release).")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation", "History"])
 
