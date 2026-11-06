@@ -200,7 +200,7 @@ def sync_calendar():
             gone["updated_at"] = str(now)
         keep = old_ev[~old_ev.key.isin(new.key) & ~old_ev.key.isin(gone.key)]
         merged = pd.concat([keep, gone, new], ignore_index=True)
-        merged = merged[pd.to_datetime(merged["time"], utc=True) > now - pd.Timedelta(days=60)]
+        merged = merged[pd.to_datetime(merged["time"], utc=True) > now - pd.Timedelta(days=730)]
         meta = pd.DataFrame([{"key": "__last_ok__", "title": "meta", "time": str(now), "impact": "",
                               "forecast": "", "previous": "", "actual": "", "status": "meta", "updated_at": str(now)}])
         delta = pd.concat([changed, gone, meta], ignore_index=True)
@@ -1153,7 +1153,83 @@ def previous_event_card():
         f'{call_html}{outcome_html}{moves_html}</div>',
         unsafe_allow_html=True)
 
-tab1, tab2, tab3, tab4 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation"])
+def event_history():
+    # every released high-impact USD event on record, with the pre-release call and the gold reaction
+    nowt = pd.Timestamp.now(tz="UTC")
+    c = cal_all.copy() if len(cal_all) else pd.DataFrame(columns=CAL_COLS)
+    c = c[(c.status == "scheduled") & (c.impact == "High")]
+    c["time"] = pd.to_datetime(c["time"], utc=True, errors="coerce")
+    c = c[c["time"].notna() & (c["time"] <= nowt)][["key", "title", "time", "forecast", "previous", "actual"]]
+    hh = h.copy()
+    hh["time"] = pd.to_datetime(hh["time"], utc=True, errors="coerce")
+    hh = hh[hh["time"].notna() & (hh["time"] <= nowt)].drop_duplicates("key", keep="last")
+    extra = hh[~hh.key.isin(c.key)][["key", "title", "time", "forecast", "previous"]].copy()
+    extra["actual"] = ""
+    base = pd.concat([c, extra], ignore_index=True)
+    st.markdown('<div class="sec">EVENT HISTORY</div>', unsafe_allow_html=True)
+    if base.empty:
+        st.caption("No released events on record yet.")
+        return
+    base["event"] = base.title.map(tag)
+    kinds = ["All"] + sorted(set(base.event))
+    pick = st.selectbox("Event type", kinds, index=kinds.index("NFP") if "NFP" in kinds else 0, key="hist_kind")
+    if pick != "All":
+        base = base[base.event == pick]
+    d = base.merge(hh[["key", "bias", "confidence", "hit", "move1", "move5", "move15", "move30"]], on="key", how="left")
+    d = d.sort_values("time", ascending=False)
+
+    def txt(v):
+        s = "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v).strip()
+        return s if s and s.lower() not in ("nan", "none") else "n/a"
+
+    def vs(r):
+        if txt(r["actual"]) == "n/a":
+            return "n/a"
+        a, f = num(str(r["actual"])), num(str(r["forecast"]))
+        if a is None or f is None:
+            return "published"
+        return "above" if a > f else "below" if a < f else "in line"
+
+    def outcome(r):
+        b = txt(r["bias"])
+        hit = pd.to_numeric(r["hit"], errors="coerce")
+        if b == "n/a":
+            return "no call logged"
+        if b == "Neutral":
+            return "neutral"
+        if pd.isna(hit):
+            return "pending"
+        return "correct" if hit == 1 else "wrong"
+
+    def mv(v):
+        v = pd.to_numeric(v, errors="coerce")
+        return "n/a" if pd.isna(v) else f"{v:+.2f}"
+
+    def cf(v):
+        v = pd.to_numeric(v, errors="coerce")
+        return "n/a" if pd.isna(v) else f"{int(v)}%"
+
+    out = pd.DataFrame({
+        "When (SAST)": d["time"].dt.tz_convert("Africa/Johannesburg").dt.strftime("%Y-%m-%d %H:%M"),
+        "Event": d["title"],
+        "Actual": d["actual"].map(txt),
+        "Forecast": d["forecast"].map(txt),
+        "Previous": d["previous"].map(txt),
+        "vs forecast": d.apply(vs, axis=1),
+        "Bias called": d["bias"].map(txt),
+        "Conf": d["confidence"].map(cf),
+        "Outcome": d.apply(outcome, axis=1),
+        "1m": d["move1"].map(mv), "5m": d["move5"].map(mv),
+        "15m": d["move15"].map(mv), "30m": d["move30"].map(mv),
+    })
+    st.dataframe(out, hide_index=True, use_container_width=True)
+    label = "released" if pick == "All" else pick
+    earliest = out.iloc[-1]["When (SAST)"][:10]
+    st.caption(f"{len(out)} {label} events on record, earliest {earliest}. Actual figures come from the calendar feed. "
+               "Bias, confidence, outcome and moves exist only for events whose call was logged before release. "
+               "Moves are USD per ounce.")
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation", "History"])
 
 with tab1:
     if hs_dash is None:
@@ -1254,6 +1330,9 @@ with tab4:
             hs_ui.render(st, cal_all, h, mk, HS)
         except Exception as _e:
             st.warning(f"HS Expectation Engine error ({type(_e).__name__}: {_e}). The rest of the app is unaffected.")
+
+with tab5:
+    event_history()
 
 st.caption("Countdowns tick every second (screen only). Price is re-requested every 5 seconds, the calendar and "
            "market inputs every 60 seconds, and bias and confidence are recalculated when those inputs change. "
