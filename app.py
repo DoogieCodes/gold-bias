@@ -74,6 +74,10 @@ st.markdown("""
 [data-testid="stExpander"]{border:1px solid #0b3040;border-radius:10px}
 .stTabs [aria-selected="true"]{color:#00E5FF!important}
 .stTabs [data-baseweb="tab-highlight"]{background:#00E5FF!important}
+[data-testid="stMetricDelta"]{font-size:.95rem!important;font-weight:700!important;border-radius:6px!important}
+[data-testid="stMetricDelta"] *{color:inherit!important}
+[data-testid="stMetricDelta"]:has([data-testid="stMetricDeltaIcon-Up"]){color:#00E676!important;background:rgba(0,230,118,.16)!important}
+[data-testid="stMetricDelta"]:has([data-testid="stMetricDeltaIcon-Down"]){color:#FF3B30!important;background:rgba(255,59,48,.16)!important}
 </style>
 """, unsafe_allow_html=True)
 
@@ -258,7 +262,7 @@ def _bls(bucket):
             out[s["seriesID"]] = vals
         return out
     except Exception:
-        return {}
+        raise
 
 def bls_mapped(title):
     tl = title.lower()
@@ -310,8 +314,11 @@ def fill_actuals(cal):
     if not mask.any():
         return cal
     age = (nowt - tt[mask].max()).total_seconds()
-    step = 60 if age <= 600 else 300 if age <= 3600 else 7200
-    d = _bls(int(time.time() // step))
+    step = 60 if age <= 600 else 300 if age <= 7200 else 3600
+    try:
+        d = _bls(int(time.time() // step))
+    except Exception:
+        return cal
     if not d:
         return cal
     cal = cal.copy()
@@ -823,12 +830,12 @@ def top_row():
         m = None
     c1, c2, c3 = st.columns(3)
     if lv:
-        c1.metric("XAUUSD", f"{lv['p']:,.2f}", f"{m['Gold'][2]:+.1f}% 5d" if m else None, delta_color="off")
+        c1.metric("XAUUSD", f"{lv['p']:,.2f}", f"{m['Gold'][2]:+.1f}% 5d" if m else None, delta_color="normal")
     elif len(px):
         c1.metric("XAUUSD (delayed)", f"{px.iloc[-1]:,.2f}")
     if m:
-        c2.metric("DOLLAR", f"{m['Dollar (DXY)'][0]:.1f}", f"{m['Dollar (DXY)'][2]:+.1f}% 5d", delta_color="off")
-        c3.metric("US 10Y", f"{m['US 10Y yield'][0]:.2f}%", f"{m['US 10Y yield'][1]:+.2f} 5d", delta_color="off")
+        c2.metric("DOLLAR", f"{m['Dollar (DXY)'][0]:.1f}", f"{m['Dollar (DXY)'][2]:+.1f}% 5d", delta_color="normal")
+        c3.metric("US 10Y", f"{m['US 10Y yield'][0]:.2f}%", f"{m['US 10Y yield'][1]:+.2f} 5d", delta_color="normal")
     tick = pd.Timestamp.now(tz="Africa/Johannesburg").strftime("%H:%M:%S")
     if lv:
         age = int(time.time() - lv["got"])
@@ -1299,6 +1306,11 @@ def event_history():
     extra = hh[~hh.key.isin(c.key)][["key", "title", "time", "forecast", "previous"]].copy()
     extra["actual"] = ""
     base = pd.concat([c, extra], ignore_index=True)
+    def _nt(t):
+        return re.sub(r"\s*\([^)]*\)", "", str(t)).strip().lower()
+    base["_k"] = base["title"].map(_nt) + "|" + base["time"].dt.strftime("%Y-%m-%d")
+    base["_has"] = base["forecast"].astype(str).str.strip().isin(["", "nan", "None"]).map(lambda z: 0 if z else 1)
+    base = base.sort_values("_has", ascending=False).drop_duplicates("_k", keep="first").drop(columns=["_k", "_has"])
     st.markdown('<div class="sec">EVENT HISTORY</div>', unsafe_allow_html=True)
     if base.empty:
         st.caption("No released events on record yet.")
@@ -1479,6 +1491,17 @@ with tab5:
             x = cal_all[cal_all.title.str.lower().str.contains("non-farm")]
             st.dataframe(x[["title", "time", "status", "impact", "forecast", "previous", "actual"]]
                          .sort_values("time", ascending=False).head(8), hide_index=True)
+        if st.button("Run fill check"):
+            try:
+                dd = _bls(int(time.time() // 60))
+                nn = dd.get("CES0000000001", {})
+                st.write("BLS series loaded:", len(dd), "| payroll Oct 2026:", nn.get((2026, 10)), "| Sep 2026:", nn.get((2026, 9)))
+                xx = cal_all[cal_all.title.str.lower().str.contains("non-farm")].copy()
+                xx["tt"] = pd.to_datetime(xx["time"], utc=True, errors="coerce")
+                xx["bls_says"] = [bls_actual(str(a), b, dd) for a, b in zip(xx.title, xx.tt)]
+                st.dataframe(xx[["title", "time", "status", "impact", "actual", "bls_says"]], hide_index=True)
+            except Exception as e:
+                st.write("Error:", type(e).__name__, str(e))
         if st.button("Test BLS fetch"):
             try:
                 yr = pd.Timestamp.now().year
