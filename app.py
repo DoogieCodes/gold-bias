@@ -1381,7 +1381,7 @@ def event_history():
         "1m": d["move1"].map(mv), "5m": d["move5"].map(mv),
         "15m": d["move15"].map(mv), "30m": d["move30"].map(mv),
     })
-    st.dataframe(out, hide_index=True, use_container_width=True)
+    dark_table(out, bias_cols=("Bias called",), signed_cols=("1m", "5m", "15m", "30m"), wrap_cols=("Event",))
     label = "released" if pick == "All" else pick
     earliest = out.iloc[-1]["When (SAST)"][:10]
     st.caption(f"{len(out)} {label} events on record, earliest {earliest}. Actual figures come from the calendar feed. "
@@ -1415,6 +1415,11 @@ def dark_table(df, bias_cols=(), signed_cols=(), wrap_cols=()):
             t, nv = "", None
         elif isinstance(v, str):
             t, nv = v, None
+            if col in signed_cols:
+                try:
+                    nv = float(v.replace("+", "").replace("%", ""))
+                except ValueError:
+                    nv = None
         else:
             try:
                 f = float(v)
@@ -1452,9 +1457,93 @@ def _log_view(h):
     return d.rename(columns={"time": "when (SAST)", "logged_at": "logged (SAST)"})
 
 
+st.markdown("<style>"
+    "@keyframes hsPulse{0%{box-shadow:0 0 0 0 rgba(0,229,255,.55)}70%{box-shadow:0 0 0 14px rgba(0,229,255,0)}100%{box-shadow:0 0 0 0 rgba(0,229,255,0)}}"
+    ".rel{background:#0a0a0a;border:1px solid #0b3040;border-radius:10px;padding:14px 16px;margin-bottom:12px;overflow-x:auto}"
+    ".rel.pulse{animation:hsPulse 1.4s ease-out 8}"
+    "table.rt{border-collapse:collapse;width:100%;font-size:.8rem;color:#d8d8d8;margin-top:8px}"
+    "table.rt th{color:#00E5FF;font-weight:500;font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;text-align:left;padding:6px 10px;white-space:nowrap;border-bottom:1px solid #0b3040}"
+    "table.rt td{padding:7px 10px;border-bottom:1px solid #111;white-space:nowrap}"
+    "table.rt td.fl{color:#8A8A8A}"
+    "</style>", unsafe_allow_html=True)
+
+@st.fragment(run_every=5)
+def result_banner():
+    import html as _h
+    nowt = pd.Timestamp.now(tz="UTC")
+    c = cal_all.copy() if len(cal_all) else pd.DataFrame(columns=CAL_COLS)
+    c = c[(c.status == "scheduled") & (c.impact == "High")]
+    c["time"] = pd.to_datetime(c["time"], utc=True, errors="coerce")
+    c = c[c["time"].notna() & (c["time"] <= nowt) & (c["time"] >= nowt - pd.Timedelta(minutes=45))]
+    if c.empty:
+        return
+    try:
+        pxs = prices()[0]["Close"]
+    except Exception:
+        pxs = pd.Series(dtype=float)
+    for t, g in c.groupby("time"):
+        age = int((nowt - t).total_seconds())
+        rows = ""
+        for _, r in g.sort_values("title").iterrows():
+            act, fc, pv = str(r["actual"]).strip(), str(r["forecast"]).strip(), str(r["previous"]).strip()
+            sur = surprise_lean(r["title"], act, fc) if act else None
+            col = bias_color(sur[0]) if sur else GREY
+            if act:
+                a_html = '<b style="color:' + col + ';font-size:1.05rem">' + _h.escape(act) + "</b>"
+            else:
+                a_html = '<span style="color:#8A8A8A">waiting for the number</span>'
+            verdict = (arrow(sur[0]) + " " + sur[0].upper()) if sur else ""
+            called = ""
+            hr = h[h.key == r["key"]]
+            if len(hr) and str(hr.iloc[0]["bias"]) in ("Bullish gold", "Bearish gold"):
+                cb = str(hr.iloc[0]["bias"])
+                note = ""
+                if sur and sur[0] in ("Bullish gold", "Bearish gold"):
+                    note = " (confirms)" if sur[0] == cb else " (contradicts)"
+                called = '<span style="color:' + bias_color(cb) + '">' + cb.upper() + "</span>" + note
+            rows += ("<tr><td>" + _h.escape(str(r["title"])) + "</td><td>" + a_html + '</td><td class="fl">' + (fc or "-")
+                     + '</td><td class="fl">' + (pv or "-") + '</td><td style="color:' + col + '">' + verdict
+                     + "</td><td>" + called + "</td></tr>")
+        if not len(pxs) or pxs.index[-1] < t:
+            gold = "Gold since release: waiting for price data (the 1-minute feed lags)"
+        else:
+            mv = float(pxs.iloc[-1] - pxs.asof(t - pd.Timedelta(minutes=1)))
+            gc = GREEN if mv > 0 else RED if mv < 0 else GREY
+            gold = 'Gold since release: <b style="color:' + gc + '">' + format(mv, "+.2f") + "</b> USD per ounce"
+        pulse = " pulse" if age < 90 else ""
+        ago = str(age // 60) + "m " + format(age % 60, "02d") + "s ago"
+        head = '<div class="rel' + pulse + '"><div class="tag">JUST RELEASED &middot; ' + ago + " &middot; " + sast(t) + " SAST</div>"
+        tbl = ('<table class="rt"><thead><tr><th>Event</th><th>Actual</th><th>Forecast</th><th>Previous</th>'
+               "<th>Surprise</th><th>Pre-release call</th></tr></thead><tbody>" + rows + "</tbody></table>")
+        st.markdown(head + tbl + '<div class="sub" style="margin-top:8px">' + gold + "</div></div>", unsafe_allow_html=True)
+
+def typical_reaction():
+    st.markdown('<div class="sec">TYPICAL REACTION</div>', unsafe_allow_html=True)
+    d = h.copy()
+    for c_ in ("move5", "move15", "move30"):
+        d[c_] = pd.to_numeric(d[c_], errors="coerce")
+    d = d[d["move30"].notna()].copy()
+    if d.empty:
+        st.caption("Collecting: typical reactions appear once releases have recorded gold moves.")
+        return
+    d["event"] = d["title"].map(tag)
+    d = d.drop_duplicates(["event", "time"])
+    rows = []
+    for k_, g in d.groupby("event"):
+        rows.append({"event": k_, "releases": len(g),
+                     "typical 5m": round(float(g["move5"].abs().median()), 2),
+                     "typical 15m": round(float(g["move15"].abs().median()), 2),
+                     "typical 30m": round(float(g["move30"].abs().median()), 2),
+                     "gold up at 15m": str(int(round(100 * float((g["move15"] > 0).mean())))) + "%"})
+    dark_table(pd.DataFrame(rows))
+    st.caption("Typical = median size of gold's move in USD per ounce, ignoring direction. Releases in the same minute "
+               "share one reaction and count once per event type. A few releases is only indicative.")
+
+
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation", "History"])
 
 with tab1:
+    result_banner()
     if hs_dash is None:
         cards_view()  # engine module missing: original view, exactly as before
     else:
@@ -1555,6 +1644,7 @@ with tab4:
 
 with tab5:
     event_history()
+    typical_reaction()
     with st.expander("Actuals check"):
         if st.button("Show NFP rows"):
             x = cal_all[cal_all.title.str.lower().str.contains("non-farm")]
