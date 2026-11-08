@@ -1,0 +1,102 @@
+name: HS release watcher
+on:
+  schedule:
+    - cron: "*/30 12-15 * * 1-5"
+    - cron: "*/30 18-20 * * 3"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Visit the app now even if no release is near"
+        default: "false"
+concurrency:
+  group: hs-watch
+  cancel-in-progress: false
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Look for a release window
+        id: plan
+        env:
+          FORCE: ${{ github.event.inputs.force }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python - <<'PY'
+          import os, json, math, urllib.request
+          from datetime import datetime, timezone, timedelta
+          now = datetime.now(timezone.utc)
+          def feed():
+              req = urllib.request.Request("https://nfs.faireconomy.media/ff_calendar_thisweek.json", headers={"User-Agent": "HighSocietyGoldBias/1.0"})
+              data = json.load(urllib.request.urlopen(req, timeout=20))
+              return [datetime.fromisoformat(x["date"]).astimezone(timezone.utc) for x in data if x.get("country") == "USD" and x.get("impact") == "High"]
+          def db():
+              u = os.environ.get("SUPABASE_URL", "").rstrip("/")
+              k = os.environ.get("SUPABASE_KEY", "")
+              if not u or not k:
+                  return []
+              req = urllib.request.Request(u + "/rest/v1/calendar?select=time&impact=eq.High&status=eq.scheduled&limit=500", headers={"apikey": k})
+              rows = json.load(urllib.request.urlopen(req, timeout=20))
+              return [datetime.fromisoformat(r["time"]).astimezone(timezone.utc) for r in rows]
+          times = []
+          for fn in (feed, db):
+              if times:
+                  break
+              try:
+                  times = fn()
+              except Exception as e:
+                  print(fn.__name__, "failed:", e)
+          near = [t for t in times if now - timedelta(minutes=35) <= t <= now + timedelta(minutes=45)]
+          stay = 0
+          if near:
+              stay = max(5, min(80, math.ceil(((max(near) + timedelta(minutes=36)) - now).total_seconds() / 60)))
+          if os.environ.get("FORCE") == "true":
+              near, stay = [now], 3
+          print("releases in window:", len(near), "| stay minutes:", stay)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("need=" + ("true" if near else "false") + "\n")
+              f.write("stay=" + str(stay) + "\n")
+          PY
+      - name: Install browser
+        if: steps.plan.outputs.need == 'true'
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+      - name: Open the app
+        if: steps.plan.outputs.need == 'true'
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          STAY_MIN: ${{ steps.plan.outputs.stay }}
+        run: |
+          python - <<'PY'
+          import os, time
+          from playwright.sync_api import sync_playwright
+          url = os.environ["APP_URL"]
+          end = time.time() + int(os.environ["STAY_MIN"]) * 60
+          with sync_playwright() as p:
+              b = p.chromium.launch()
+              pg = b.new_page()
+              n = 0
+              while True:
+                  n += 1
+                  try:
+                      pg.goto(url, wait_until="domcontentloaded", timeout=120000)
+                      try:
+                          pg.get_by_role("button", name="Yes, get this app back up!").click(timeout=10000)
+                          print("woke the app")
+                      except Exception:
+                          pass
+                      pg.wait_for_timeout(45000)
+                      print("visit", n, "ok")
+                  except Exception as e:
+                      print("visit", n, "problem:", e)
+                  left = end - time.time()
+                  if left <= 0:
+                      break
+                  time.sleep(min(420, left))
+              b.close()
+          PY
