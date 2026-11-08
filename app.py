@@ -1388,6 +1388,70 @@ def event_history():
                "Bias, confidence, outcome and moves exist only for events whose call was logged before release. "
                "Moves are USD per ounce. A ~ means the actual was filled from FRED (latest revised figure, can differ slightly from the first release).")
 
+DT_CSS = (
+    ".dt-wrap{overflow-x:auto;border:1px solid #0b3040;border-radius:10px;margin:8px 0 14px;background:#000}"
+    "table.dt{border-collapse:collapse;width:100%;font-size:.8rem;color:#d8d8d8}"
+    "table.dt th{background:#06121a;color:#00E5FF;font-family:'Montserrat',sans-serif;font-weight:500;font-size:.64rem;letter-spacing:.14em;text-transform:uppercase;text-align:left;padding:10px 12px;white-space:nowrap;border-bottom:1px solid #0b3040}"
+    "table.dt td{padding:9px 12px;border-bottom:1px solid #111}"
+    "table.dt td.nw{white-space:nowrap}"
+    "table.dt tr:last-child td{border-bottom:none}"
+    "table.dt tbody tr:hover td{background:#08141b}"
+    "table.dt td.up{color:#00E676;font-weight:700}"
+    "table.dt td.dn{color:#FF3B30;font-weight:700}"
+    "table.dt td.fl{color:#8A8A8A}"
+)
+st.markdown("<style>" + DT_CSS + "</style>", unsafe_allow_html=True)
+
+def dark_table(df, bias_cols=(), signed_cols=(), wrap_cols=()):
+    import html as _h
+    if df is None or not len(df):
+        st.caption("Nothing to show yet.")
+        return
+    d = df.reset_index(drop=True)
+    head = "".join("<th>" + _h.escape(str(c).replace("_", " ")) + "</th>" for c in d.columns)
+
+    def cell(col, v):
+        if v is None or (not isinstance(v, str) and pd.isna(v)):
+            t, nv = "", None
+        elif isinstance(v, str):
+            t, nv = v, None
+        else:
+            try:
+                f = float(v)
+                t = str(int(f)) if f.is_integer() else f"{f:.2f}"
+                nv = f
+            except Exception:
+                t, nv = str(v), None
+        low = t.lower()
+        cls = ""
+        if col in bias_cols:
+            cls = "up" if ("bull" in low or "\u25b2" in t) else "dn" if ("bear" in low or "\u25bc" in t) else "fl"
+        elif col in signed_cols and nv is not None:
+            cls = "up" if nv > 0 else "dn" if nv < 0 else "fl"
+        elif col == "hit" and nv is not None:
+            cls = "up" if nv == 1 else "dn"
+        elif low in ("validated", "correct"):
+            cls = "up"
+        elif low == "wrong":
+            cls = "dn"
+        if col not in wrap_cols:
+            cls = (cls + " nw").strip()
+        return '<td class="' + cls + '">' + _h.escape(t) + "</td>"
+
+    body = "".join("<tr>" + "".join(cell(c, v) for c, v in zip(d.columns, row)) + "</tr>"
+                   for row in d.itertuples(index=False, name=None))
+    st.markdown('<div class="dt-wrap"><table class="dt"><thead><tr>' + head + "</tr></thead><tbody>" + body
+                + "</tbody></table></div>", unsafe_allow_html=True)
+
+def _log_view(h):
+    d = h[pd.to_numeric(h.pre_release, errors="coerce") == 1].drop(columns=["key", "pre_release"]).copy()
+    d["time"] = pd.to_datetime(d["time"], utc=True, errors="coerce")
+    d = d.sort_values("time", ascending=False).head(30)
+    d["time"] = d["time"].dt.tz_convert("Africa/Johannesburg").dt.strftime("%d %b %H:%M")
+    d["logged_at"] = pd.to_datetime(d["logged_at"], utc=True, errors="coerce").dt.tz_convert("Africa/Johannesburg").dt.strftime("%d %b %H:%M")
+    return d.rename(columns={"time": "when (SAST)", "logged_at": "logged (SAST)"})
+
+
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation", "History"])
 
 with tab1:
@@ -1423,7 +1487,7 @@ with tab2:
             txt = "Waiting for forecast"
         rows.append((t, name, txt))
     cal = pd.DataFrame([(sast(t), n, b) for t, n, b in sorted(rows)], columns=["When (SAST)", "Event", "Bias"])
-    st.dataframe(cal, hide_index=True, use_container_width=True)
+    dark_table(cal, bias_cols=("Bias",), wrap_cols=("Event",))
     gone = cal_all[(cal_all.status == "cancelled_or_moved") & (pd.to_datetime(cal_all.time, utc=True) > now)] if len(cal_all) else cal_all
     if len(gone):
         st.warning("Removed or rescheduled since the last check: " + ", ".join(gone.title))
@@ -1443,13 +1507,13 @@ with tab3:
             hit=("hit", "mean"), calls=("hit", "count"), move15=("move15", lambda x: x.abs().median()),
             mfe=("mfe", "mean"), mae=("mae", "mean")).round(2)
         by["hit"] = (by["hit"] * 100).round(0).astype(int).astype(str) + "%"
-        st.dataframe(by.rename(columns={"hit": "accuracy", "move15": "median |15m|"}), use_container_width=True)
+        dark_table(by.rename(columns={"hit": "accuracy", "move15": "median |15m|"}).reset_index())
         bands = pd.cut(ok.confidence, [-1, 30, 60, 100], labels=["0-30", "30-60", "60-100"])
         band = ok.groupby(bands, observed=True).agg(accuracy=("hit", "mean"), calls=("hit", "count"))
         if len(band):
             band["accuracy"] = (band["accuracy"] * 100).round(0).astype(int).astype(str) + "%"
             st.caption("Does higher confidence actually win more often?")
-            st.dataframe(band, use_container_width=True)
+            dark_table(band.reset_index())
     else:
         st.caption("No completed pre-release calls yet. A call counts as completed 30 minutes after its release, once its outcome is recorded.")
     pre = h[pd.to_numeric(h.pre_release, errors="coerce") == 1]
@@ -1459,7 +1523,7 @@ with tab3:
                             "directional": validation(t_)["n"], "status": validation(t_)["state"].replace("_", " ")}
                            for t_ in tags])
         st.caption("Validation status by event type (pending = awaiting outcome)")
-        st.dataframe(vt, hide_index=True, use_container_width=True)
+        dark_table(vt)
     if len(ok):
         dd = ok.bias.map({"Bullish gold": 1, "Bearish gold": -1})
         b1, b2 = st.columns(2)
@@ -1472,11 +1536,10 @@ with tab3:
             fo[c_] = pd.to_numeric(fo[c_], errors="coerce")
         fo["decision 0-5m"], fo["statement 5-30m"], fo["press conf 30-60m"] = fo.move5, fo.move30 - fo.move5, fo.move60 - fo.move30
         st.caption("FOMC reactions by phase ($). Outlook = broader view, spike = predicted first move.")
-        st.dataframe(fo[["time", "bias", "spike_bias", "decision 0-5m", "statement 5-30m", "press conf 30-60m"]].round(2), hide_index=True)
+        dark_table(fo[["time", "bias", "spike_bias", "decision 0-5m", "statement 5-30m", "press conf 30-60m"]].round(2), bias_cols=("bias", "spike_bias"), signed_cols=("decision 0-5m", "statement 5-30m", "press conf 30-60m"))
     if st.session_state.get("db_err"):
         st.warning("The database rejected a save. Run the SQL migration, then reload.")
-    st.dataframe(h[pd.to_numeric(h.pre_release, errors="coerce") == 1]
-                 .drop(columns=["key", "pre_release"]).sort_values("time", ascending=False).head(30), hide_index=True)
+    dark_table(_log_view(h), bias_cols=("bias", "spike_bias"), signed_cols=("move1", "move5", "move15", "move30", "move60", "net15"), wrap_cols=("title",))
     st.caption("Directionally correct is not the same as profitable: the profit view subtracts an assumed "
                f"${COST:.2f} per ounce for spread and slippage and ignores execution risk. Only predictions logged "
                "before release are evaluated. Reaction data is 1-minute resolution, so 5s/15s/30s moves are not available.")
