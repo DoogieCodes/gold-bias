@@ -178,7 +178,7 @@ def surprise_lean(title, act, fc):
         return "Neutral", 0, z
     return ("Bearish gold" if (d if a > f else -d) > 0 else "Bullish gold"), strength, z
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=600, show_spinner=False)
 def sync_calendar():
     """Pull the feed, merge into the saved calendar (revisions, duplicates, cancellations), persist it."""
     old = load_cal()
@@ -237,7 +237,7 @@ BLS_URL2 = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
 BLS_IDS = ["CES0000000001", "LNS14000000", "CES0500000003", "CUSR0000SA0", "CUSR0000SA0L1E",
            "CUUR0000SA0", "CUUR0000SA0L1E", "WPSFD4"]
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def _bls(bucket):
     # one request covers every series; the bucket number only controls how often it is refreshed
     try:
@@ -352,7 +352,7 @@ def events():
     df["post"], df["z"] = [o[2] for o in out], [o[3] for o in out]
     return df.sort_values("time"), last_ok, err, cal
 
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=86400, show_spinner=False)
 def bls_dates():
     txt = requests.get("https://www.bls.gov/schedule/news_release/bls.ics",
                        headers={"User-Agent": "Mozilla/5.0"}, timeout=15).text
@@ -390,7 +390,7 @@ def oanda_cfg():
     except Exception:
         return None
 
-@st.cache_data(ttl=2)
+@st.cache_data(ttl=2, show_spinner=False)
 def live_price():
     """Newest price available. Uses the OANDA v20 pricing endpoint when credentials are in Secrets,
     otherwise gold-api.com. Short cache so repeated calls inside a few seconds don't hammer the provider."""
@@ -410,11 +410,11 @@ def live_price():
     j = r.json()
     return float(j["price"]), "gold-api.com spot", j.get("updatedAt")
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=30, show_spinner=False)
 def prices():
     return gold_series("5d", "1m")
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner=False)
 def market():
     out = {}
     gd, _ = gold_series("1mo", "1d")
@@ -434,7 +434,7 @@ def market():
     out["_asof"] = series["Dollar (DXY)"].index[-1]
     return out
 
-@st.cache_data(ttl=21600)
+@st.cache_data(ttl=21600, show_spinner=False)
 def macro():
     """Inflation, unemployment and the effective Fed funds rate from FRED's public CSV download links."""
     def series(sid):
@@ -654,6 +654,9 @@ st.markdown('<div class="brand"><div class="wm">HIGH SOCIETY</div><div class="bx
             '<div class="wm2">TFF@HIGHTABLE</div><div class="tg" style="margin-top:12px">GOLD NEWS BIAS</div></div>',
             unsafe_allow_html=True)
 member = gate()
+_warm = st.empty()
+if not st.session_state.get("_warmed"):
+    _warm.markdown('<div style="text-align:center;margin:40px 0"><div class="sec">HS IS WARMING UP</div><div class="meta">Loading the calendar and market data</div></div>', unsafe_allow_html=True)
 who = f" · {member.upper()}" if member else ""
 try:
     ev, cal_ok, cal_err, cal_all = events()
@@ -672,6 +675,8 @@ try:
     mac = macro()
 except Exception:
     mac = {}
+_warm.empty()
+st.session_state["_warmed"] = True
 
 def clipv(x):
     return max(-1.0, min(1.0, x))
@@ -1257,7 +1262,7 @@ def previous_event_card():
         f'{call_html}{outcome_html}{moves_html}</div>',
         unsafe_allow_html=True)
 
-@st.cache_data(ttl=21600)
+@st.cache_data(ttl=21600, show_spinner=False)
 def _fred_s(sid):
     r = requests.get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}", timeout=15,
                      headers={"User-Agent": "HighSocietyGoldBias/1.0"})
