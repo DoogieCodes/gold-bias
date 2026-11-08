@@ -1402,19 +1402,31 @@ DT_CSS = (
 )
 st.markdown("<style>" + DT_CSS + "</style>", unsafe_allow_html=True)
 
-def dark_table(df, bias_cols=(), signed_cols=(), wrap_cols=()):
+def dark_table(df, bias_cols=(), signed_cols=(), wrap_cols=(), max_rows=300):
     import html as _h
+    import numpy as _np
     if df is None or not len(df):
         st.caption("Nothing to show yet.")
         return
     d = df.reset_index(drop=True)
+    more = len(d) - max_rows
+    if more > 0:
+        d = d.head(max_rows)
     head = "".join("<th>" + _h.escape(str(c).replace("_", " ")) + "</th>" for c in d.columns)
 
     def cell(col, v):
-        if v is None or (not isinstance(v, str) and pd.isna(v)):
-            t, nv = "", None
+        cls, nv = "", None
+        try:
+            miss = v is None or (not isinstance(v, (str, bool, _np.bool_)) and bool(pd.isna(v)))
+        except Exception:
+            miss = False
+        if miss:
+            t = ""
+        elif isinstance(v, (bool, _np.bool_)):
+            t = "yes" if v else "no"
+            cls = "up" if v else "dn"
         elif isinstance(v, str):
-            t, nv = v, None
+            t = v
             if col in signed_cols:
                 try:
                     nv = float(v.replace("+", "").replace("%", ""))
@@ -1423,22 +1435,22 @@ def dark_table(df, bias_cols=(), signed_cols=(), wrap_cols=()):
         else:
             try:
                 f = float(v)
-                t = str(int(f)) if f.is_integer() else f"{f:.2f}"
+                t = str(int(f)) if f.is_integer() else f"{f:.3f}".rstrip("0").rstrip(".")
                 nv = f
             except Exception:
-                t, nv = str(v), None
+                t = str(v)
         low = t.lower()
-        cls = ""
-        if col in bias_cols:
-            cls = "up" if ("bull" in low or "\u25b2" in t) else "dn" if ("bear" in low or "\u25bc" in t) else "fl"
-        elif col in signed_cols and nv is not None:
-            cls = "up" if nv > 0 else "dn" if nv < 0 else "fl"
-        elif col == "hit" and nv is not None:
-            cls = "up" if nv == 1 else "dn"
-        elif low in ("validated", "correct"):
-            cls = "up"
-        elif low == "wrong":
-            cls = "dn"
+        if cls == "":
+            if col in bias_cols:
+                cls = "up" if ("bull" in low or "\u25b2" in t) else "dn" if ("bear" in low or "\u25bc" in t) else "fl"
+            elif col in signed_cols and nv is not None:
+                cls = "up" if nv > 0 else "dn" if nv < 0 else "fl"
+            elif col == "hit" and nv is not None:
+                cls = "up" if nv == 1 else "dn"
+            elif low in ("validated", "correct"):
+                cls = "up"
+            elif low == "wrong":
+                cls = "dn"
         if col not in wrap_cols:
             cls = (cls + " nw").strip()
         return '<td class="' + cls + '">' + _h.escape(t) + "</td>"
@@ -1447,6 +1459,8 @@ def dark_table(df, bias_cols=(), signed_cols=(), wrap_cols=()):
                    for row in d.itertuples(index=False, name=None))
     st.markdown('<div class="dt-wrap"><table class="dt"><thead><tr>' + head + "</tr></thead><tbody>" + body
                 + "</tbody></table></div>", unsafe_allow_html=True)
+    if more > 0:
+        st.caption("Showing the first " + str(max_rows) + " of " + str(len(df)) + " rows.")
 
 def _log_view(h):
     d = h[pd.to_numeric(h.pre_release, errors="coerce") == 1].drop(columns=["key", "pre_release"]).copy()
@@ -1538,6 +1552,31 @@ def typical_reaction():
     dark_table(pd.DataFrame(rows))
     st.caption("Typical = median size of gold's move in USD per ounce, ignoring direction. Releases in the same minute "
                "share one reaction and count once per event type. A few releases is only indicative.")
+
+
+def _make_dark(orig):
+    def _w(data=None, *args, **kwargs):
+        try:
+            d = data
+            if d.__class__.__name__ == "Styler":
+                d = d.data
+            if isinstance(d, pd.Series):
+                d = d.to_frame()
+            if not isinstance(d, pd.DataFrame):
+                return orig(data, *args, **kwargs)
+            if kwargs.get("hide_index") is not True and not isinstance(d.index, pd.RangeIndex):
+                d = d.reset_index()
+            wrap = [c for c in d.columns if len(d) and d[c].astype(str).str.len().max() > 40]
+            bias = [c for c in d.columns if "bias" in str(c).lower()]
+            dark_table(d, bias_cols=bias, wrap_cols=wrap)
+        except Exception:
+            return orig(data, *args, **kwargs)
+    _w._hs_dark = True
+    return _w
+
+if not getattr(st.dataframe, "_hs_dark", False):
+    st.dataframe = _make_dark(st.dataframe)
+    st.table = _make_dark(st.table)
 
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation", "History"])
