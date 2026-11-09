@@ -1906,6 +1906,29 @@ html,body{margin:0;padding:0;height:100%;background:transparent;color:#fff;font-
 .g{flex:0 0 200px;text-align:center;margin:0 auto}
 @keyframes pl{0%,100%{box-shadow:0 0 22px rgba(0,229,255,.35)}50%{box-shadow:0 0 46px rgba(0,229,255,.8)}}
 #box.soon{animation:pl 1.2s ease-in-out infinite}
+
+@media (max-width: 600px) {
+ #box {
+  flex-direction:column;
+  align-items:stretch;
+  justify-content:flex-start;
+  gap:8px;
+  padding:14px;
+  min-height:0;
+ }
+ .l {width:100%;flex:none}
+ .tag {font-size:9px;letter-spacing:.2em}
+ .ttl {font-size:19px;overflow-wrap:anywhere}
+ .cd {gap:5px;margin:12px 0}
+ .u {flex:1;min-width:0;padding:8px 3px}
+ .u b {font-size:21px}
+ .u span {font-size:8px;letter-spacing:.12em}
+ .kv {gap:12px;font-size:9px}
+ .kv b {font-size:13px}
+ .g {width:100%;flex:none;margin:0 auto}
+ .g svg {max-width:100%;height:auto}
+ .more {overflow-wrap:anywhere}
+}
 </style>
 <div id="box">
  <div class="l">
@@ -2019,7 +2042,7 @@ def hero_card():
            .replace("@@ARCOP@@", "1" if (has and conf > 0) else "0")
            .replace("@@CONF@@", (str(conf) + "%") if has else "--")
            .replace("@@BTXT@@", _h.escape(btxt)))
-    components.html(doc, height=430)
+    components.html(doc, height=560)
 
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation", "History", "FOMC"])
