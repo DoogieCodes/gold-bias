@@ -826,6 +826,67 @@ def fetch_live():
     except Exception as e:
         st.session_state["live_err"] = type(e).__name__
 
+st.markdown("<style>"
+    ".gcard{background:#0a0a0a;border:1px solid #0b3040;border-radius:12px;padding:12px 16px;margin-bottom:10px}"
+    ".gcard .grow{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-top:2px}"
+    ".gp{font-family:'Montserrat',sans-serif;font-weight:700;font-size:clamp(1.9rem,8vw,2.8rem);line-height:1.1;color:#fff}"
+    ".gchg{font-size:.85rem;font-weight:700}"
+    ".gsub{font-size:.64rem;letter-spacing:.1em;color:#7a7a7a;margin-top:4px}"
+    "@keyframes gUp0{0%{color:#00E676;text-shadow:0 0 18px rgba(0,230,118,.8)}100%{color:#fff;text-shadow:none}}"
+    "@keyframes gUp1{0%{color:#00E676;text-shadow:0 0 18px rgba(0,230,118,.8)}100%{color:#fff;text-shadow:none}}"
+    "@keyframes gDn0{0%{color:#FF3B30;text-shadow:0 0 18px rgba(255,59,48,.8)}100%{color:#fff;text-shadow:none}}"
+    "@keyframes gDn1{0%{color:#FF3B30;text-shadow:0 0 18px rgba(255,59,48,.8)}100%{color:#fff;text-shadow:none}}"
+    ".gp.fl-up0{animation:gUp0 1.2s ease-out}.gp.fl-up1{animation:gUp1 1.2s ease-out}"
+    ".gp.fl-dn0{animation:gDn0 1.2s ease-out}.gp.fl-dn1{animation:gDn1 1.2s ease-out}"
+    "</style>", unsafe_allow_html=True)
+
+def gold_card(lv, m):
+    import base64
+    try:
+        pxs = prices()[0]["Close"].tail(180)
+    except Exception:
+        pxs = pd.Series(dtype=float)
+    ys = [float(v) for v in pxs.values] if len(pxs) else []
+    p = lv["p"] if lv else (ys[-1] if ys else None)
+    if p is None:
+        return ""
+    last = st.session_state.get("_gp")
+    cls = st.session_state.get("_gcls", "")
+    if last is not None and abs(p - last) > 1e-9:
+        par = 1 - st.session_state.get("_gpar", 0)
+        st.session_state["_gpar"] = par
+        cls = ("fl-up" if p > last else "fl-dn") + str(par)
+        st.session_state["_gcls"] = cls
+    st.session_state["_gp"] = p
+    chg = ""
+    if m:
+        pc = m["Gold"][2]
+        cc = GREEN if pc > 0 else RED if pc < 0 else GREY
+        chg = ('<span class="gchg" style="color:' + cc + '">' + arrow("Bullish gold" if pc > 0 else "Bearish gold" if pc < 0 else "")
+               + " " + format(pc, "+.1f") + "% 5d</span>")
+    img, sub = "", ""
+    if len(ys) >= 10:
+        lo, hi = min(ys), max(ys)
+        rng = (hi - lo) or 1.0
+        w, ht = 360, 64
+        xy = [(2 + i * (w - 4) / (len(ys) - 1), ht - 4 - (y - lo) / rng * (ht - 10)) for i, y in enumerate(ys)]
+        pts = " ".join(format(x, ".1f") + "," + format(y, ".1f") for x, y in xy)
+        col = GREEN if ys[-1] >= ys[0] else RED
+        sv = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 64" width="360" height="64">',
+              '<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="' + col
+              + '" stop-opacity=".35"/><stop offset="1" stop-color="' + col + '" stop-opacity="0"/></linearGradient></defs>',
+              '<polygon points="2,' + str(ht) + " " + pts + " " + str(w - 2) + "," + str(ht) + '" fill="url(#g)"/>',
+              '<polyline points="' + pts + '" fill="none" stroke="' + col + '" stroke-width="2" stroke-linejoin="round"/>',
+              '<circle cx="' + format(xy[-1][0], ".1f") + '" cy="' + format(xy[-1][1], ".1f") + '" r="3.5" fill="' + col + '"/>',
+              "</svg>"]
+        img = ('<img style="width:100%;display:block;margin-top:8px" src="data:image/svg+xml;base64,'
+               + base64.b64encode("".join(sv).encode("utf-8")).decode("ascii") + '"/>')
+        sub = "3H " + format(ys[-1] - ys[0], "+.2f") + " &middot; LOW " + format(lo, ",.2f") + " &middot; HIGH " + format(hi, ",.2f")
+    tg = "XAUUSD &middot; GOLD" + ("" if lv else " (DELAYED)")
+    return ('<div class="gcard"><div class="tag">' + tg + '</div><div class="grow"><div class="gp ' + cls + '">'
+            + format(p, ",.2f") + "</div>" + chg + "</div>" + img + '<div class="gsub">' + sub + "</div></div>")
+
+
 @st.fragment(run_every=5)
 def top_row():
     fetch_live()
@@ -834,11 +895,9 @@ def top_row():
         m = market()
     except Exception:
         m = None
-    c1, c2, c3 = st.columns(3)
-    if lv:
-        c1.metric("XAUUSD", f"{lv['p']:,.2f}", f"{m['Gold'][2]:+.1f}% 5d" if m else None, delta_color="normal")
-    elif len(px):
-        c1.metric("XAUUSD (delayed)", f"{px.iloc[-1]:,.2f}")
+    if lv or len(px):
+        st.markdown(gold_card(lv, m), unsafe_allow_html=True)
+    c2, c3 = st.columns(2)
     if m:
         c2.metric("DOLLAR", f"{m['Dollar (DXY)'][0]:.1f}", f"{m['Dollar (DXY)'][2]:+.1f}% 5d", delta_color="normal")
         c3.metric("US 10Y", f"{m['US 10Y yield'][0]:.2f}%", f"{m['US 10Y yield'][1]:+.2f} 5d", delta_color="normal")
@@ -1828,10 +1887,146 @@ def fomc_statement_view():
             st.write(para)
 
 
+HERO_TPL = r'''
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;500;700&display=swap');
+html,body{margin:0;padding:0;height:100%;background:transparent;color:#fff;font-family:'Montserrat',Arial,sans-serif}
+#box{display:flex;gap:18px;align-items:center;justify-content:space-between;flex-wrap:wrap;align-content:center;border:1px solid rgba(0,229,255,.25);border-radius:14px;padding:18px;background:radial-gradient(120% 140% at 50% 0%,#07141b 0%,#000 70%);box-sizing:border-box;min-height:calc(100% - 8px);margin:4px}
+.l{flex:1 1 280px;min-width:0}
+.tag{font-size:11px;letter-spacing:.3em;color:#00E5FF;font-weight:500}
+.ttl{font-size:22px;font-weight:700;margin:4px 0 2px;line-height:1.2}
+.sub{font-size:12px;color:#9a9a9a}
+.cd{display:flex;gap:10px;margin:14px 0 10px;flex-wrap:wrap}
+.u{min-width:58px;text-align:center;background:#06121a;border:1px solid #0b3040;border-radius:10px;padding:8px 6px}
+.u b{display:block;font-size:26px;font-weight:700;letter-spacing:.04em;font-variant-numeric:tabular-nums}
+.u span{font-size:9px;letter-spacing:.2em;color:#7a7a7a}
+.kv{display:flex;gap:18px;flex-wrap:wrap;font-size:10px;letter-spacing:.1em;color:#7a7a7a}
+.kv b{display:block;color:#fff;font-size:14px;letter-spacing:0;margin-top:2px}
+.more{margin-top:8px;font-size:11px;color:#7a7a7a}
+.g{flex:0 0 200px;text-align:center;margin:0 auto}
+@keyframes pl{0%,100%{box-shadow:0 0 22px rgba(0,229,255,.35)}50%{box-shadow:0 0 46px rgba(0,229,255,.8)}}
+#box.soon{animation:pl 1.2s ease-in-out infinite}
+</style>
+<div id="box">
+ <div class="l">
+  <div class="tag">@@TAG@@</div>
+  <div class="ttl">@@TITLE@@</div>
+  <div class="sub">@@WHEN@@ SAST</div>
+  <div class="cd">
+   <div class="u"><b id="d">--</b><span>DAYS</span></div>
+   <div class="u"><b id="h">--</b><span>HRS</span></div>
+   <div class="u"><b id="m">--</b><span>MIN</span></div>
+   <div class="u"><b id="s">--</b><span>SEC</span></div>
+  </div>
+  <div class="sub" id="rel" style="display:none;color:#00E5FF;margin-bottom:8px">RELEASED - the result card appears above.</div>
+  <div class="kv">@@KV@@</div>
+  <div class="more">@@MORE@@</div>
+ </div>
+ <div class="g">
+  <svg viewBox="0 0 200 124" width="200">
+   <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#161616" stroke-width="14" stroke-linecap="round"/>
+   <path id="arc" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="@@COL@@" stroke-width="14" stroke-linecap="round" stroke-dasharray="0 260" opacity="@@ARCOP@@" style="transition:stroke-dasharray 1.3s ease-out;filter:drop-shadow(0 0 6px @@COL@@)"/>
+   <text x="100" y="84" text-anchor="middle" font-size="32" font-weight="700" fill="#fff">@@CONF@@</text>
+   <text x="100" y="106" text-anchor="middle" font-size="9" letter-spacing="2" fill="@@COL@@">@@BTXT@@</text>
+   <text x="100" y="120" text-anchor="middle" font-size="8" letter-spacing="2" fill="#6a6a6a">CONFIDENCE</text>
+  </svg>
+ </div>
+</div>
+<script>
+(function(){
+ var T0 = new Date("@@ISO@@").getTime();
+ var box = document.getElementById("box");
+ function p2(n){ return (n < 10 ? "0" : "") + n; }
+ function put(id, v){ document.getElementById(id).textContent = v; }
+ function tick(){
+  var s = Math.floor((T0 - Date.now()) / 1000);
+  if (s <= 0){
+   put("d","00"); put("h","00"); put("m","00"); put("s","00");
+   document.getElementById("rel").style.display = "block";
+   box.className = "";
+   box.style.borderColor = "rgba(0,229,255,.85)";
+   box.style.boxShadow = "0 0 40px rgba(0,229,255,.6)";
+   return;
+  }
+  put("d", p2(Math.floor(s / 86400)));
+  put("h", p2(Math.floor(s % 86400 / 3600)));
+  put("m", p2(Math.floor(s % 3600 / 60)));
+  put("s", p2(s % 60));
+  var g = Math.max(0, Math.min(1, 1 - s / 3600));
+  box.style.borderColor = "rgba(0,229,255," + (0.25 + 0.6 * g).toFixed(2) + ")";
+  box.style.boxShadow = "0 0 " + (6 + 34 * g).toFixed(0) + "px rgba(0,229,255," + (0.12 + 0.45 * g).toFixed(2) + ")";
+  box.className = (s < 300) ? "soon" : "";
+ }
+ tick();
+ setInterval(tick, 1000);
+ setTimeout(function(){ document.getElementById("arc").setAttribute("stroke-dasharray", "@@FILL@@ 260"); }, 60);
+})();
+</script>
+'''
+
+def hero_card():
+    import html as _h
+    import streamlit.components.v1 as components
+    nowt = pd.Timestamp.now(tz="UTC")
+    c = cal_all.copy() if len(cal_all) else pd.DataFrame(columns=CAL_COLS)
+    c = c[(c.status == "scheduled") & (c.impact == "High")]
+    c["time"] = pd.to_datetime(c["time"], utc=True, errors="coerce")
+    c = c[c["time"].notna() & (c["time"] > nowt)].sort_values("time")
+    if c.empty:
+        return
+    t0 = c["time"].iloc[0]
+    g = c[c["time"] == t0].copy()
+    g["_nt"] = g["title"].astype(str).map(lambda x: re.sub(r"\s*\([^)]*\)", "", x).strip().lower())
+    g["_has"] = g["forecast"].astype(str).str.strip().map(lambda z: 0 if z in ("", "nan", "None") else 1)
+    g = g.sort_values("_has", ascending=False).drop_duplicates("_nt", keep="first")
+    order = ["FOMC", "NFP", "CPI", "PPI", "PCE", "GDP", "RETAIL", "PMI", "JOBS", "CLAIMS", "NEWS"]
+    g["_pr"] = g["title"].map(lambda x: order.index(tag(x)) if tag(x) in order else 99)
+    g = g.sort_values(["_pr", "title"])
+    r = g.iloc[0]
+    others = [str(x) for x in g["title"].iloc[1:]]
+    card = {x["key"]: x for x in st.session_state.get("cards", [])}.get(r["key"])
+    if card:
+        bias, grade = card["bias"], card.get("grade")
+        conf = int(card["conf"])
+        has = bias != "Neutral" or bool(grade)
+        btxt = (grade or bias).upper()
+        qual = str(card["quality"])
+        lbl = str(card["lbl"])
+    else:
+        bias, grade, conf, has = "Neutral", None, 0, False
+        btxt, qual, lbl = "PREDICTION PENDING", "Pending", tag(str(r["title"]))
+    col = bias_color(bias)
+    fill = format(conf / 100.0 * 251.3, ".1f") if has else "0"
+    fc, pv = str(r["forecast"]).strip(), str(r["previous"]).strip()
+    kv = [("FORECAST", fc if fc not in ("", "nan", "None") else "-"),
+          ("PREVIOUS", pv if pv not in ("", "nan", "None") else "-")]
+    hsv = hs_for(str(r["title"]), t0)
+    if hsv:
+        est, unit = hsv
+        kv.append(("HS ESTIMATE", format(est, "+.0f" if abs(est) >= 10 else "+.2f")
+                   + (unit if unit in ("K", "%", "M", "B") else ((" " + unit) if unit else ""))))
+    kv.append(("SIGNAL QUALITY", qual))
+    kv_html = "".join("<div>" + k_ + "<b>" + _h.escape(v_) + "</b></div>" for k_, v_ in kv)
+    more = ("+" + str(len(others)) + " more at the same time: " + ", ".join(others)) if others else ""
+    doc = (HERO_TPL.replace("@@TAG@@", "NEXT EVENT &middot; " + _h.escape(lbl))
+           .replace("@@TITLE@@", _h.escape(str(r["title"])))
+           .replace("@@WHEN@@", sast(t0))
+           .replace("@@KV@@", kv_html)
+           .replace("@@MORE@@", _h.escape(more))
+           .replace("@@ISO@@", t0.strftime("%Y-%m-%dT%H:%M:%SZ"))
+           .replace("@@COL@@", col)
+           .replace("@@FILL@@", fill)
+           .replace("@@ARCOP@@", "1" if (has and conf > 0) else "0")
+           .replace("@@CONF@@", (str(conf) + "%") if has else "--")
+           .replace("@@BTXT@@", _h.escape(btxt)))
+    components.html(doc, height=430)
+
+
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation", "History", "FOMC"])
 
 with tab1:
     result_banner()
+    hero_card()
     if hs_dash is None:
         cards_view()  # engine module missing: original view, exactly as before
     else:
