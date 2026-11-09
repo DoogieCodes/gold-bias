@@ -1524,7 +1524,7 @@ def result_banner():
             if hsv:
                 est, unit = hsv
                 mult = 1000.0 if unit.upper() == "K" else 1.0
-                shown = format(est, "+g") + (unit if unit in ("K", "%", "M", "B") else ((" " + unit) if unit else ""))
+                shown = format(est, "+.0f" if abs(est) >= 10 else "+.2f") + (unit if unit in ("K", "%", "M", "B") else ((" " + unit) if unit else ""))
                 hs_cell = _h.escape(shown)
                 a_n, f_n = num(act), num(fc)
                 if a_n is not None and f_n is not None and unit.upper() in ("", "K", "%"):
