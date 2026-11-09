@@ -1498,7 +1498,11 @@ def result_banner():
     for t, g in c.groupby("time"):
         age = int((nowt - t).total_seconds())
         rows = ""
-        for _, r in g.sort_values("title").iterrows():
+        g = g.copy()
+        g["_nt"] = g["title"].astype(str).map(lambda x: re.sub(r"\s*\([^)]*\)", "", x).strip().lower())
+        g["_has"] = g["forecast"].astype(str).str.strip().map(lambda z: 0 if z in ("", "nan", "None") else 1)
+        g = g.sort_values("_has", ascending=False).drop_duplicates("_nt", keep="first").sort_values("title")
+        for _, r in g.iterrows():
             act, fc, pv = str(r["actual"]).strip(), str(r["forecast"]).strip(), str(r["previous"]).strip()
             sur = surprise_lean(r["title"], act, fc) if act else None
             col = bias_color(sur[0]) if sur else GREY
@@ -1515,9 +1519,20 @@ def result_banner():
                 if sur and sur[0] in ("Bullish gold", "Bearish gold"):
                     note = " (confirms)" if sur[0] == cb else " (contradicts)"
                 called = '<span style="color:' + bias_color(cb) + '">' + cb.upper() + "</span>" + note
+            hs_cell = ""
+            hsv = hs_for(str(r["title"]), t)
+            if hsv:
+                est, unit = hsv
+                mult = 1000.0 if unit.upper() == "K" else 1.0
+                shown = format(est, "+g") + (unit if unit in ("K", "%", "M", "B") else ((" " + unit) if unit else ""))
+                hs_cell = _h.escape(shown)
+                a_n, f_n = num(act), num(fc)
+                if a_n is not None and f_n is not None and unit.upper() in ("", "K", "%"):
+                    closer = abs(a_n - est * mult) < abs(a_n - f_n)
+                    hs_cell += ' <span style="color:' + (GREEN if closer else GREY) + '">(' + ("HS closer" if closer else "consensus closer") + ")</span>"
             rows += ("<tr><td>" + _h.escape(str(r["title"])) + "</td><td>" + a_html + '</td><td class="fl">' + (fc or "-")
                      + '</td><td class="fl">' + (pv or "-") + '</td><td style="color:' + col + '">' + verdict
-                     + "</td><td>" + called + "</td></tr>")
+                     + "</td><td>" + hs_cell + "</td><td>" + called + "</td></tr>")
         if not len(pxs) or pxs.index[-1] < t:
             gold = "Gold since release: waiting for price data (the 1-minute feed lags)"
         else:
@@ -1528,8 +1543,10 @@ def result_banner():
         ago = str(age // 60) + "m " + format(age % 60, "02d") + "s ago"
         head = '<div class="rel' + pulse + '"><div class="tag">JUST RELEASED &middot; ' + ago + " &middot; " + sast(t) + " SAST</div>"
         tbl = ('<table class="rt"><thead><tr><th>Event</th><th>Actual</th><th>Forecast</th><th>Previous</th>'
-               "<th>Surprise</th><th>Pre-release call</th></tr></thead><tbody>" + rows + "</tbody></table>")
-        st.markdown(head + tbl + '<div class="sub" style="margin-top:8px">' + gold + "</div></div>", unsafe_allow_html=True)
+               "<th>Surprise</th><th>HS estimate</th><th>Pre-release call</th></tr></thead><tbody>" + rows + "</tbody></table>")
+        pts = _px_points(pxs, t)
+        chart = reaction_svg(pts) if len(pts) >= 3 else ""
+        st.markdown(head + tbl + '<div class="sub" style="margin-top:8px">' + gold + "</div>" + chart + "</div>", unsafe_allow_html=True)
 
 def typical_reaction():
     st.markdown('<div class="sec">TYPICAL REACTION</div>', unsafe_allow_html=True)
@@ -1579,7 +1596,239 @@ if not getattr(st.dataframe, "_hs_dark", False):
     st.table = _make_dark(st.table)
 
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation", "History"])
+st.markdown("<style>.fd-del{color:#FF3B30;text-decoration:line-through}.fd-add{color:#00E676;font-weight:600}</style>", unsafe_allow_html=True)
+
+HS_FC_COLS = ["forecast_id", "event_key", "release", "measure", "title", "scheduled_utc", "consensus", "hs_estimate",
+              "method", "baseline_estimate", "interval_lo", "interval_hi", "interval_basis", "unit", "model_version",
+              "validation_status", "n_train", "inputs_last_obs", "generated_at_utc", "data_origin"]
+
+@st.cache_data(ttl=60, show_spinner=False)
+def hs_fc_table():
+    frames = []
+    d1 = sb_load("hs_forecasts", HS_FC_COLS)
+    if d1 is not None:
+        frames.append(d1)
+    p_ = os.path.join("hs_data", "forecasts.csv")
+    if os.path.exists(p_):
+        try:
+            frames.append(pd.read_csv(p_, dtype=str))
+        except Exception:
+            pass
+    frames = [f for f in frames if len(f)]
+    if not frames:
+        return pd.DataFrame()
+    d = pd.concat(frames, ignore_index=True)
+    for c_ in HS_FC_COLS:
+        if c_ not in d.columns:
+            d[c_] = None
+    d = d.drop_duplicates("forecast_id")
+    d["sched"] = pd.to_datetime(d["scheduled_utc"], utc=True, errors="coerce")
+    d["gen"] = pd.to_datetime(d["generated_at_utc"], utc=True, errors="coerce")
+    d["nt"] = d["title"].astype(str).map(lambda x: re.sub(r"\s*\([^)]*\)", "", x).strip().lower())
+    return d
+
+def hs_for(title, t):
+    # the HS engine's last pre-release estimate for this event, or None
+    try:
+        d = hs_fc_table()
+        if d.empty:
+            return None
+        nt = re.sub(r"\s*\([^)]*\)", "", str(title)).strip().lower()
+        m = d[(d["nt"] == nt) & d["sched"].notna() & ((d["sched"] - t).abs() < pd.Timedelta(minutes=2)) & (d["gen"] < d["sched"])]
+        if m.empty:
+            return None
+        r = m.sort_values("gen").iloc[-1]
+        u = r["unit"]
+        u = "" if u is None or (isinstance(u, float) and pd.isna(u)) else str(u).strip()
+        return float(r["hs_estimate"]), u
+    except Exception:
+        return None
+
+def _px_points(pxs, t):
+    # (minutes from release, USD change) from the 1-minute series, 5 minutes before to 30 minutes after
+    if pxs is None or not len(pxs):
+        return []
+    one = pd.Timedelta(minutes=1)
+    seg = pxs[(pxs.index + one >= t - 5 * one) & (pxs.index + one <= t + 30 * one)]
+    if not len(seg):
+        return []
+    p0 = pxs.asof(t - one)
+    if pd.isna(p0):
+        return []
+    return [(round(((ix + one) - t).total_seconds() / 60.0, 2), float(v - p0)) for ix, v in seg.items()]
+
+def reaction_svg(pts, w=560, ht=150):
+    import base64
+    pts = [(x, y) for x, y in pts if pd.notna(y)]
+    if len(pts) < 2:
+        return ""
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    x0, x1 = min(xs), max(xs)
+    if x1 - x0 < 1e-9:
+        return ""
+    lo, hi = min(min(ys), 0.0), max(max(ys), 0.0)
+    if hi - lo < 1e-9:
+        lo, hi = lo - 1.0, hi + 1.0
+    pad = (hi - lo) * 0.12
+    lo, hi = lo - pad, hi + pad
+    L, R, T, B = 46, 12, 10, 24
+    sx = lambda x: L + (x - x0) / (x1 - x0) * (w - L - R)
+    sy = lambda y: T + (hi - y) / (hi - lo) * (ht - T - B)
+    col = GREEN if ys[-1] > 0 else RED if ys[-1] < 0 else GREY
+    path = " ".join(("M" if i == 0 else "L") + format(sx(x), ".1f") + "," + format(sy(y), ".1f") for i, (x, y) in enumerate(pts))
+    p = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + str(w) + " " + str(ht) + '" width="' + str(w) + '" height="' + str(ht) + '" font-family="Arial, sans-serif">']
+    p.append('<line x1="' + str(L) + '" x2="' + str(w - R) + '" y1="' + format(sy(0), ".1f") + '" y2="' + format(sy(0), ".1f") + '" stroke="#3a3a3a" stroke-dasharray="4 4"/>')
+    if x0 <= 0 <= x1:
+        p.append('<line x1="' + format(sx(0), ".1f") + '" x2="' + format(sx(0), ".1f") + '" y1="' + str(T) + '" y2="' + str(ht - B) + '" stroke="#00E5FF" stroke-opacity=".6" stroke-dasharray="3 3"/>')
+        p.append('<text x="' + format(sx(0) + 4, ".1f") + '" y="' + str(T + 9) + '" fill="#00E5FF" font-size="9">RELEASE</text>')
+    for tk in (-5, 0, 5, 10, 15, 20, 25, 30):
+        if x0 - 0.01 <= tk <= x1 + 0.01:
+            p.append('<text x="' + format(sx(tk), ".1f") + '" y="' + str(ht - 8) + '" fill="#8A8A8A" font-size="9" text-anchor="middle">' + ("+" if tk > 0 else "") + str(tk) + "m</text>")
+    for yv in (hi, 0.0, lo):
+        p.append('<text x="' + str(L - 6) + '" y="' + format(sy(yv) + 3, ".1f") + '" fill="#8A8A8A" font-size="9" text-anchor="end">' + format(yv, "+.1f") + "</text>")
+    p.append('<path d="' + path + '" fill="none" stroke="' + col + '" stroke-width="2" stroke-linejoin="round"/>')
+    ex, ey = pts[-1]
+    p.append('<circle cx="' + format(sx(ex), ".1f") + '" cy="' + format(sy(ey), ".1f") + '" r="3.5" fill="' + col + '"/>')
+    p.append("</svg>")
+    b64 = base64.b64encode("".join(p).encode("utf-8")).decode("ascii")
+    return '<img style="width:100%;max-width:' + str(w) + 'px;display:block;margin-top:10px" src="data:image/svg+xml;base64,' + b64 + '"/>'
+
+def reaction_chart_picker():
+    st.markdown('<div class="sec">REACTION CHART</div>', unsafe_allow_html=True)
+    d = h.copy()
+    for c_ in ("move1", "move5", "move15", "move30"):
+        d[c_] = pd.to_numeric(d[c_], errors="coerce")
+    d["tt"] = pd.to_datetime(d["time"], utc=True, errors="coerce")
+    d = d[d["move30"].notna() & d["tt"].notna()].sort_values("tt", ascending=False)
+    if d.empty:
+        st.caption("Charts appear once a release has recorded gold moves.")
+        return
+    labels = {r_["key"]: r_["tt"].tz_convert("Africa/Johannesburg").strftime("%d %b %H:%M") + " - " + str(r_["title"]) for _, r_ in d.iterrows()}
+    pick = st.selectbox("Release", list(labels.keys()), format_func=lambda k: labels[k], key="rx_pick")
+    r = d[d["key"] == pick].iloc[0]
+    try:
+        pxs = prices()[0]["Close"]
+    except Exception:
+        pxs = pd.Series(dtype=float)
+    pts = _px_points(pxs, r["tt"])
+    note = "from the 1-minute price feed"
+    if len(pts) < 10 or max(p_[0] for p_ in pts) < 28:
+        raw = [(0, 0.0), (1, r["move1"]), (5, r["move5"]), (15, r["move15"]), (30, r["move30"])]
+        pts = [(x, float(y)) for x, y in raw if pd.notna(y)]
+        note = "drawn from the saved 1, 5, 15 and 30 minute moves"
+    st.markdown(reaction_svg(pts), unsafe_allow_html=True)
+    st.caption("Gold change since the release, USD per ounce, " + note + ".")
+
+FOMC_STATEMENT_DATES = ["2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18", "2025-07-30", "2025-09-17", "2025-10-29",
+                        "2025-12-10", "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17", "2026-07-29", "2026-09-16",
+                        "2026-10-28", "2026-12-09"]
+_HAWK = re.compile(r"\belevated\b|\bupside risks?\b|\bstrong(er)?\b|\bsolid\b|\brestrictive\b|\btight\w*|\bpersist\w*", re.I)
+_DOVE = re.compile(r"\bmoderat\w*|\beas(ed|ing)\b|\bsoft\w*|\bdownside risks?\b|\bcool\w*|\bweak\w*|\bslow\w*|\blower\b|\breduc\w*|\bcut\b", re.I)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fed_text(ds, bucket):
+    import html as _h
+    try:
+        r = requests.get("https://www.federalreserve.gov/newsevents/pressreleases/monetary" + ds.replace("-", "") + "a.htm",
+                         timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return ""
+        out = []
+        for p_ in re.findall(r"<p[^>]*>(.*?)</p>", r.text, re.S | re.I):
+            t_ = re.sub(r"\s+", " ", _h.unescape(re.sub(r"<[^>]+>", " ", p_))).strip()
+            if len(t_) < 40:
+                continue
+            out.append(t_)
+            if t_.lower().startswith("voting for the monetary policy action"):
+                break
+        return "\n".join(out) if len(out) >= 3 else ""
+    except Exception:
+        return ""
+
+def _fomc_sents(txt):
+    out = []
+    for para in txt.split("\n"):
+        out += [x.strip() for x in re.split(r"(?<=\.)\s+(?=[A-Z])", para) if x.strip()]
+    return out
+
+def _wdiff(old, new):
+    import difflib
+    import html as _h
+    ow, nw = old.split(), new.split()
+    oh, nh = [], []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ow, nw, autojunk=False).get_opcodes():
+        o_, n_ = " ".join(ow[i1:i2]), " ".join(nw[j1:j2])
+        if op == "equal":
+            oh.append(_h.escape(o_))
+            nh.append(_h.escape(n_))
+        else:
+            if o_:
+                oh.append('<span class="fd-del">' + _h.escape(o_) + "</span>")
+            if n_:
+                nh.append('<span class="fd-add">' + _h.escape(n_) + "</span>")
+    return " ".join(oh), " ".join(nh)
+
+def fomc_statement_view():
+    import html as _h
+    import difflib
+    st.markdown('<div class="sec">FOMC STATEMENT READER</div>', unsafe_allow_html=True)
+    nowt = pd.Timestamp.now(tz="UTC")
+    texts = []
+    for ds in reversed(FOMC_STATEMENT_DATES):
+        rel = pd.Timestamp(ds + " 14:00", tz="America/New_York").tz_convert("UTC")
+        if rel > nowt:
+            continue
+        fresh = (nowt - rel) < pd.Timedelta(hours=6)
+        txt = _fed_text(ds, int(time.time() // (120 if fresh else 3600)))
+        if txt:
+            texts.append((ds, txt))
+        if len(texts) == 2:
+            break
+    if len(texts) < 2:
+        st.caption("Could not load two FOMC statements from federalreserve.gov right now. It retries automatically.")
+        return
+    (d_new, t_new), (d_old, t_old) = texts
+    a, b = _fomc_sents(t_old), _fomc_sents(t_new)
+    blocks, same, rem_txt, add_txt = [], 0, "", ""
+    dele = lambda xs: " ".join('<span class="fd-del">' + _h.escape(x) + "</span>" for x in xs)
+    addl = lambda xs: " ".join('<span class="fd-add">' + _h.escape(x) + "</span>" for x in xs)
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            same += i2 - i1
+            continue
+        rem_txt += " " + " ".join(a[i1:i2])
+        add_txt += " " + " ".join(b[j1:j2])
+        if op == "replace" and (i2 - i1) == (j2 - j1):
+            for o_, n_ in zip(a[i1:i2], b[j1:j2]):
+                blocks.append(_wdiff(o_, n_))
+        else:
+            blocks.append((dele(a[i1:i2]), addl(b[j1:j2])))
+    sc = (len(_HAWK.findall(add_txt)) - len(_HAWK.findall(rem_txt))) - (len(_DOVE.findall(add_txt)) - len(_DOVE.findall(rem_txt)))
+    if sc >= 2:
+        tone, tc = "leans hawkish (usually bearish for gold)", RED
+    elif sc <= -2:
+        tone, tc = "leans dovish (usually bullish for gold)", GREEN
+    else:
+        tone, tc = "no clear shift in tone", GREY
+    fmt = lambda x: pd.Timestamp(x).strftime("%d %b %Y")
+    st.markdown('<div class="sub">Statement of ' + fmt(d_new) + " compared with " + fmt(d_old) + ". " + str(same)
+                + " sentences unchanged, " + str(len(blocks)) + " changed.</div>"
+                + '<div class="bias" style="color:' + tc + '">Wording tone: ' + tone + "</div>"
+                + '<div class="sub">Crude keyword count, not a trading signal. Read the changes below.</div>', unsafe_allow_html=True)
+    if not blocks:
+        st.caption("No wording changes found between these two statements.")
+    for oh, nh in blocks:
+        st.markdown('<div class="card"><div class="tag">BEFORE</div><div class="sub" style="color:#d8d8d8">' + (oh or "(nothing)")
+                    + '</div><div class="tag" style="margin-top:8px">AFTER</div><div class="sub" style="color:#d8d8d8">'
+                    + (nh or "(removed)") + "</div></div>", unsafe_allow_html=True)
+    st.markdown("[Open the new statement on federalreserve.gov](https://www.federalreserve.gov/newsevents/pressreleases/monetary"
+                + d_new.replace("-", "") + "a.htm)")
+    with st.expander("Full text of the " + fmt(d_new) + " statement"):
+        for para in t_new.split("\n"):
+            st.write(para)
+
+
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation", "History", "FOMC"])
 
 with tab1:
     result_banner()
@@ -1684,6 +1933,7 @@ with tab4:
 with tab5:
     event_history()
     typical_reaction()
+    reaction_chart_picker()
     with st.expander("Actuals check"):
         if st.button("Show NFP rows"):
             x = cal_all[cal_all.title.str.lower().str.contains("non-farm")]
@@ -1717,6 +1967,9 @@ with tab5:
                     st.write("Latest payroll rows:", ser[0]["data"][:2])
             except Exception as e:
                 st.write("Error:", type(e).__name__, str(e))
+
+with tab6:
+    fomc_statement_view()
 
 st.caption("Countdowns tick every second (screen only). Price is re-requested every 5 seconds, the calendar and "
            "market inputs every 60 seconds, and bias and confidence are recalculated when those inputs change. "
