@@ -1900,8 +1900,9 @@ html,body{margin:0;padding:0;height:100%;background:transparent;color:#fff;font-
 .u{min-width:58px;text-align:center;background:#06121a;border:1px solid #0b3040;border-radius:10px;padding:8px 6px}
 .u b{display:block;font-size:26px;font-weight:700;letter-spacing:.04em;font-variant-numeric:tabular-nums}
 .u span{font-size:9px;letter-spacing:.2em;color:#7a7a7a}
-.kv{display:flex;gap:18px;flex-wrap:wrap;font-size:10px;letter-spacing:.1em;color:#7a7a7a}
-.kv b{display:block;color:#fff;font-size:14px;letter-spacing:0;margin-top:2px}
+.kv{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:14px;font-size:9px;letter-spacing:.12em;color:#84939a}
+.kv>div{min-width:0;background:linear-gradient(145deg,#091820,#050a0e);border:1px solid #142b35;border-radius:9px;padding:10px 11px;box-sizing:border-box}
+.kv b{display:block;color:#fff;font-size:15px;letter-spacing:0;margin-top:5px;font-weight:700;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
 .more{margin-top:8px;font-size:11px;color:#7a7a7a}
 .g{flex:0 0 200px;text-align:center;margin:0 auto}
 @keyframes pl{0%,100%{box-shadow:0 0 22px rgba(0,229,255,.35)}50%{box-shadow:0 0 46px rgba(0,229,255,.8)}}
@@ -1923,7 +1924,8 @@ html,body{margin:0;padding:0;height:100%;background:transparent;color:#fff;font-
  .u {flex:1;min-width:0;padding:8px 3px}
  .u b {font-size:21px}
  .u span {font-size:8px;letter-spacing:.12em}
- .kv {gap:12px;font-size:9px}
+ .kv {grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;font-size:8px;margin-top:10px}
+ .kv>div {padding:9px}
  .kv b {font-size:13px}
  .g {width:100%;flex:none;margin:0 auto}
  .g svg {max-width:100%;height:auto}
@@ -1944,6 +1946,7 @@ html,body{margin:0;padding:0;height:100%;background:transparent;color:#fff;font-
   <div class="sub" id="rel" style="display:none;color:#00E5FF;margin-bottom:8px">RELEASED - the result card appears above.</div>
   <div class="kv">@@KV@@</div>
   <div class="more">@@MORE@@</div>
+  
  </div>
  <div class="g">
   <svg viewBox="0 0 200 124" width="200">
@@ -2021,15 +2024,27 @@ def hero_card():
     col = bias_color(bias)
     fill = format(conf / 100.0 * 251.3, ".1f") if has else "0"
     fc, pv = str(r["forecast"]).strip(), str(r["previous"]).strip()
-    kv = [("FORECAST", fc if fc not in ("", "nan", "None") else "-"),
-          ("PREVIOUS", pv if pv not in ("", "nan", "None") else "-")]
+    av = str(r.get("actual", "")).strip()
+    valid = lambda x: x not in ("", "nan", "None")
+    forecast_bias, _ = lean(str(r["title"]), fc, pv)
+    forecast_col = bias_color(forecast_bias) if valid(fc) and valid(pv) else GREY
+    actual_signal = surprise_lean(str(r["title"]), av, fc) if valid(av) and valid(fc) else None
+    actual_col = bias_color(actual_signal[0]) if actual_signal else GREY
+    kv = [("FORECAST", fc if valid(fc) else "-"),
+          ("PREVIOUS", pv if valid(pv) else "-"),
+          ("ACTUAL", av if valid(av) else "PENDING")]
+    kv_colors = {"FORECAST": forecast_col, "ACTUAL": actual_col}
+
     hsv = hs_for(str(r["title"]), t0)
     if hsv:
         est, unit = hsv
         kv.append(("HS ESTIMATE", format(est, "+.0f" if abs(est) >= 10 else "+.2f")
                    + (unit if unit in ("K", "%", "M", "B") else ((" " + unit) if unit else ""))))
     kv.append(("SIGNAL QUALITY", qual))
-    kv_html = "".join("<div>" + k_ + "<b>" + _h.escape(v_) + "</b></div>" for k_, v_ in kv)
+    kv_html = "".join(
+        "<div>" + k_ + "<b style='color:" + kv_colors.get(k_, "#fff") + "'>"
+        + _h.escape(v_) + "</b></div>" for k_, v_ in kv
+    )
     more = ("+" + str(len(others)) + " more at the same time: " + ", ".join(others)) if others else ""
     doc = (HERO_TPL.replace("@@TAG@@", "NEXT EVENT &middot; " + _h.escape(lbl))
            .replace("@@TITLE@@", _h.escape(str(r["title"])))
@@ -2194,3 +2209,4 @@ st.caption("Countdowns tick every second (screen only). Price is re-requested ev
            "Pair arrows show the usual USD relationship if the bias plays out. Confidence reflects the evidence, "
            "not a calibrated probability. Not financial advice.")
 st.markdown('<div class="foot">HIGH SOCIETY<br><span class="fx">×</span><br>TFF@HIGHTABLE</div>', unsafe_allow_html=True)
+

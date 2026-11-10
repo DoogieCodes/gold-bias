@@ -1,0 +1,51 @@
+# Secrets (NEVER commit)
+.streamlit/secrets.toml
+secrets.toml
+.env
+.env.*
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Local data (user-owned; keep local)
+history.csv
+calendar.csv
+hs_data/
+
+# Backups, logs, generated files
+*.bak
+*.bak-*
+*.orig
+*.log
+*.tmp
+backups/
+gold-bias-backup-*/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local backups, logs and one-off patch scripts
+app.py.before_*
+compile_output.txt
+streamlit_output.txt
+patch_hero_mobile.py
+
+# Local test environment
+.venv-test/
