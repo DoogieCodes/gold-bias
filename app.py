@@ -1506,9 +1506,9 @@ def dark_table(df, bias_cols=(), signed_cols=(), wrap_cols=(), max_rows=300):
                 cls = "up" if nv > 0 else "dn" if nv < 0 else "fl"
             elif col == "hit" and nv is not None:
                 cls = "up" if nv == 1 else "dn"
-            elif low in ("validated", "correct"):
+            elif low in ("validated", "correct", "win"):
                 cls = "up"
-            elif low == "wrong":
+            elif low in ("wrong", "loss"):
                 cls = "dn"
         if col not in wrap_cols:
             cls = (cls + " nw").strip()
@@ -2060,6 +2060,155 @@ def hero_card():
     components.html(doc, height=560)
 
 
+# ============================================================================
+# PASTE THIS BLOCK into app.py just ABOVE the line:
+#     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([...])
+# (it uses h, cal_all, tag, num, fred_actual, hs_for, dark_table, which are all defined earlier)
+# ============================================================================
+
+SCORE_TAGS = ("NFP", "CPI", "PPI", "FOMC", "PCE")           # data releases only
+SKIP_WORDS = ("speaks", "speech", "press conference", "minutes", "testif")
+CKPTS = [("1M", "move1", 1), ("5M", "move5", 5), ("15M", "move15", 15), ("30M", "move30", 30)]
+
+
+def _clean(v):
+    s = "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v).strip()
+    return "" if s.lower() in ("nan", "none") else s
+
+
+def _headline_rank(title):
+    # lower = preferred when several figures drop in the same minute (CPI m/m, core CPI, CPI y/y ...)
+    t = str(title).lower()
+    return (0 if "federal funds" in t else 4) + (2 if "core" in t else 0) + (1 if "y/y" in t else 0)
+
+
+def score_call(r):
+    """Win/loss for one logged call, or None if there is nothing to score.
+    Win  = the initial spike (1m move, or 5m if the 1m was flat) went the way the call said.
+    Then walks the 1m/5m/15m/30m readings to see how long the move stayed with the call."""
+    b = str(r["bias"])
+    if b not in ("Bullish gold", "Bearish gold"):
+        return None
+    d = 1 if b == "Bullish gold" else -1
+    mv = {lab: pd.to_numeric(r[col], errors="coerce") for lab, col, _ in CKPTS}
+    spike = mv["1M"] if (pd.notna(mv["1M"]) and mv["1M"] != 0) else mv["5M"]
+    if pd.isna(spike) or spike == 0:
+        return None
+    win = d * spike > 0
+    held, flip, rec = None, None, None
+    for lab, _, mins in CKPTS:
+        v = mv[lab]
+        if pd.isna(v) or v == 0:
+            continue
+        if win:
+            if d * v > 0:
+                held = (lab, mins)
+            else:
+                flip = lab
+                break
+        elif d * v > 0:
+            rec = lab
+            break
+    if win:
+        held = held or ("1M", 1)
+        txt = f"held to {held[0]}" if flip is None else f"held to {held[0]}, faded at {flip}"
+        return {"win": True, "spike": float(spike), "text": txt, "held_min": held[1]}
+    txt = f"against the call, recovered by {rec}" if rec else "against the call throughout"
+    return {"win": False, "spike": float(spike), "text": txt, "held_min": 0}
+
+
+def scorecard():
+    st.markdown('<div class="sec">CALL SCORECARD</div>', unsafe_allow_html=True)
+    d = h[pd.to_numeric(h.pre_release, errors="coerce") == 1].copy()
+    d["event"] = d["title"].map(tag)
+    d = d[d["event"].isin(SCORE_TAGS)]
+    d = d[~d["title"].astype(str).str.lower().str.contains("|".join(SKIP_WORDS))]
+    d = d[d["bias"].isin(["Bullish gold", "Bearish gold"])]          # neutral calls are skipped
+    d["time"] = pd.to_datetime(d["time"], utc=True, errors="coerce")
+    d = d[d["time"].notna() & d["move30"].notna()]                     # only once the 30m window has closed
+    if d.empty:
+        st.caption("No scored calls yet. A call appears here once its 30-minute window has closed "
+                   "(NFP, CPI, PPI, FOMC and PCE only; neutral calls are not scored).")
+        return
+    d["_rank"] = d["title"].map(_headline_rank)
+    d["_conf"] = -pd.to_numeric(d["confidence"], errors="coerce").fillna(0)
+    d = d.sort_values(["event", "time", "_rank", "_conf"]).drop_duplicates(["event", "time"], keep="first")
+    d = d.sort_values("time")                                          # oldest first, for the streak maths
+
+    amap = dict(zip(cal_all.key, cal_all.actual)) if len(cal_all) else {}
+    rows, res, held15 = [], [], 0
+    for _, r in d.iterrows():
+        s = score_call(r)
+        if s is None:
+            continue
+        t, title = r["time"], str(r["title"])
+        fc, pv = _clean(r["forecast"]), _clean(r["previous"])
+        act, mark = _clean(amap.get(r["key"], "")), ""
+        if not act:
+            v = fred_actual(title, t)
+            if v:
+                act, mark = v, "~"
+        a, f = num(act), num(fc)
+        vs = "-" if not act else ("published" if a is None or f is None
+                                  else "above" if a > f else "below" if a < f else "in line")
+        hs_txt = "-"
+        hsv = hs_for(title, t)
+        if hsv:
+            est, unit = hsv
+            hs_txt = format(est, "+.0f" if abs(est) >= 10 else "+.2f") + (
+                unit if unit in ("K", "%", "M", "B") else ((" " + unit) if unit else ""))
+            if a is not None and f is not None and unit.upper() in ("", "K", "%"):
+                mult = 1000.0 if unit.upper() == "K" else 1.0
+                hs_txt += " (HS closer)" if abs(a - est * mult) < abs(a - f) else " (consensus closer)"
+        cf = pd.to_numeric(r["confidence"], errors="coerce")
+        res.append(s["win"])
+        held15 += int(s["win"] and s["held_min"] >= 15)
+        rows.append({
+            "When (SAST)": t.tz_convert("Africa/Johannesburg").strftime("%Y-%m-%d %H:%M"),
+            "Event": title,
+            "Previous": pv or "-", "Forecast": fc or "-", "Actual": (mark + act) if act else "-",
+            "vs forecast": vs, "HS estimate": hs_txt,
+            "Called": str(r["bias"]), "Conf": "n/a" if pd.isna(cf) else f"{int(cf)}%",
+            "Spike": f"{s['spike']:+.2f}", "Played out": s["text"],
+            "Result": "Win" if s["win"] else "Loss",
+        })
+    if not res:
+        st.caption("No scorable calls yet (the first move after release was flat or not recorded).")
+        return
+
+    n, wins = len(res), sum(res)
+    cur = 1
+    for x in reversed(res[:-1]):
+        if x == res[-1]:
+            cur += 1
+        else:
+            break
+    best_w = best_l = run = 0
+    prev = None
+    for x in res:
+        run = run + 1 if x == prev else 1
+        prev = x
+        if x:
+            best_w = max(best_w, run)
+        else:
+            best_l = max(best_l, run)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Record", f"{wins}W - {n - wins}L")
+    c2.metric("Win rate", f"{wins / n:.0%}")
+    c3.metric("Streak", f"{'W' if res[-1] else 'L'}{cur}")
+    c4.metric("Best win streak", str(best_w))
+    st.caption(f"Held 15M or longer on {held15} of {wins} wins. Longest losing streak: {best_l}.")
+
+    out = pd.DataFrame(rows[::-1])                                     # newest first
+    dark_table(out, bias_cols=("Called",), signed_cols=("Spike",), wrap_cols=("Event", "Played out"))
+    st.caption("Win = the first move after the release (1m, or 5m if the 1m was flat) went the way the call said. "
+               "'Played out' shows how many of the 1m, 5m, 15m and 30m readings stayed with the call before it faded. "
+               "Neutral calls, speeches and non-data events are not scored. One row per release: when several figures "
+               "land in the same minute (CPI m/m, core, y/y) the headline one is scored. Spike is USD per ounce. "
+               "A ~ on Actual means it was filled from FRED (latest revised figure).")
+
+
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Upcoming", "Calendar", "Track record", "HS Expectation", "History", "FOMC"])
 
 with tab1:
@@ -2164,6 +2313,7 @@ with tab4:
             st.warning(f"HS Expectation Engine error ({type(_e).__name__}: {_e}). The rest of the app is unaffected.")
 
 with tab5:
+    scorecard()
     event_history()
     typical_reaction()
     reaction_chart_picker()
