@@ -374,7 +374,7 @@ def bls_dates():
     return out
 
 def gold_series(period, interval):
-    for tk, name in [("XAUUSD=X", "Spot XAUUSD"), ("GC=F", "Futures GC=F")]:
+    for tk, name in [("GC=F", "Futures GC=F"), ("XAUUSD=X", "Spot XAUUSD")]:
         try:
             d = yf.Ticker(tk).history(period=period, interval=interval)[["Close", "High", "Low"]].dropna()
             if len(d) > 5:
@@ -553,8 +553,10 @@ def update_history(h, ev, pxd, cmap):
         new = [str(t), b, s0, conf, r["forecast"], r["previous"], sp]
         idx = h.index[h.key == key]
         if len(idx) == 0:
-            h.loc[len(h)] = [key, r["title"], str(t), b, s0, conf, r["forecast"], r["previous"], MODEL_VERSION,
-                             str(now), 1] + [None] * 9 + [sp, None]
+            nan = float("nan")
+            row = [key, r["title"], str(t), b, s0, nan if conf is None else conf, r["forecast"], r["previous"],
+                   MODEL_VERSION, str(now), 1] + [nan] * 9 + [sp, nan]
+            h = pd.concat([h, pd.DataFrame([row], columns=COLS)], ignore_index=True)
             dirty.append(key)
         else:
             i = idx[0]
